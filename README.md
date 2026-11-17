@@ -1,13 +1,13 @@
-# Astro_Nuit (Android)
+# Ile_Cradle
 
-Android-версия планетария **Astro_Nuit**.
+Android-планетарий **Ile_Cradle**.
 
 - Kotlin + Jetpack Compose
 - Карта неба, планеты, звёзды, туманности
 - Сборка APK через GitHub Actions
 
 Репозиторий: `ile_cradle`  
-Приложение: **Astro_Nuit**
+Приложение: **Ile_Cradle**
 
 ## Сборка
 
