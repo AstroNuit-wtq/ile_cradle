@@ -5,7 +5,17 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,8 +27,18 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Nightlight
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,7 +55,8 @@ import com.astronuit.app.data.NebulaCatalog
 import com.astronuit.app.data.PlanetCatalog
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun AstroNuitApp() {
@@ -45,7 +66,11 @@ fun AstroNuitApp() {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
 
-    Box(Modifier = Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
         SkyCanvas(
             scale = scale,
             offset = offset,
@@ -56,12 +81,12 @@ fun AstroNuitApp() {
         )
 
         Column(
-            Modifier
+            modifier = Modifier
                 .fillMaxSize()
                 .padding(12.dp)
         ) {
             TopBar()
-            Spacer(Modifier.weight(1f))
+            Spacer(modifier = Modifier.weight(1f))
             BottomBar(
                 isNightMode = isNightMode,
                 onNightToggle = { isNightMode = !isNightMode },
@@ -88,19 +113,21 @@ fun LaunchScreen(onFinish: () -> Unit) {
         onFinish()
     }
     Box(
-        Modifier.fillMaxSize().background(Color.Black),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                "Ile_Cradle",
+                text = "Ile_Cradle",
                 color = Color.White.copy(alpha = alpha.value),
                 fontSize = 40.sp,
                 fontWeight = FontWeight.Light
             )
-            Spacer(Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
             Text(
-                "Исследуй ночное небо",
+                text = "Исследуй ночное небо",
                 color = Color.White.copy(alpha = 0.6f * alpha.value),
                 fontSize = 14.sp
             )
@@ -112,25 +139,42 @@ fun LaunchScreen(onFinish: () -> Unit) {
 fun TopBar() {
     val time = SimpleDateFormat("d MMM, HH:mm", Locale("ru")).format(Date())
     Row(
-        Modifier
+        modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(Color.White.copy(alpha = 0.12f))
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(Icons.Default.LocationOn, null, tint = Color.White.copy(0.9f), modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(6.dp))
-        Text("Текущее место", color = Color.White.copy(0.9f), fontSize = 13.sp)
-        Spacer(Modifier.weight(1f))
-        Text(time, color = Color.White.copy(0.9f), fontSize = 13.sp)
+        Icon(
+            imageVector = Icons.Default.LocationOn,
+            contentDescription = null,
+            tint = Color.White.copy(alpha = 0.9f),
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = "Текущее место",
+            color = Color.White.copy(alpha = 0.9f),
+            fontSize = 13.sp
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        Text(
+            text = time,
+            color = Color.White.copy(alpha = 0.9f),
+            fontSize = 13.sp
+        )
     }
 }
 
 @Composable
-fun BottomBar(isNightMode: Boolean, onNightToggle: () -> Unit, onNebulae: () -> Unit) {
+fun BottomBar(
+    isNightMode: Boolean,
+    onNightToggle: () -> Unit,
+    onNebulae: () -> Unit
+) {
     Row(
-        Modifier
+        modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(22.dp))
             .background(Color.White.copy(alpha = 0.12f))
@@ -138,29 +182,52 @@ fun BottomBar(isNightMode: Boolean, onNightToggle: () -> Unit, onNebulae: () -> 
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(Icons.Default.Search, null, tint = Color.White, modifier = Modifier.size(24.dp))
+        Icon(
+            imageVector = Icons.Default.Search,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(24.dp)
+        )
         IconButton(onClick = onNebulae) {
-            Icon(Icons.Default.AutoAwesome, null, tint = Color.White)
+            Icon(
+                imageVector = Icons.Default.AutoAwesome,
+                contentDescription = null,
+                tint = Color.White
+            )
         }
-        Icon(Icons.Default.Tune, null, tint = Color.White, modifier = Modifier.size(24.dp))
+        Icon(
+            imageVector = Icons.Default.Tune,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(24.dp)
+        )
         IconButton(onClick = onNightToggle) {
             Icon(
-                if (isNightMode) Icons.Default.DarkMode else Icons.Default.Nightlight,
-                null,
+                imageVector = if (isNightMode) Icons.Default.DarkMode else Icons.Default.Nightlight,
+                contentDescription = null,
                 tint = if (isNightMode) Color(0xFFC02015) else Color.White
             )
         }
-        Icon(Icons.Default.Explore, null, tint = Color.White, modifier = Modifier.size(24.dp))
+        Icon(
+            imageVector = Icons.Default.Explore,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(24.dp)
+        )
     }
 }
 
 @Composable
-fun SkyCanvas(scale: Float, offset: Offset, onTransform: (zoom: Float, pan: Offset) -> Unit) {
+fun SkyCanvas(
+    scale: Float,
+    offset: Offset,
+    onTransform: (zoom: Float, pan: Offset) -> Unit
+) {
     val stars = remember { BrightStarCatalog.stars }
     val planets = remember { PlanetCatalog.all }
 
     Canvas(
-        Modifier
+        modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
@@ -168,19 +235,20 @@ fun SkyCanvas(scale: Float, offset: Offset, onTransform: (zoom: Float, pan: Offs
                 }
             }
     ) {
-        val cx = size.width / 2 + offset.x
-        val cy = size.height / 2 + offset.y
+        val cx = size.width / 2f + offset.x
+        val cy = size.height / 2f + offset.y
+        val dim = size.minDimension
 
         for (star in stars) {
-            val x = cx + star.x * scale * size.minDimension * 0.4f
-            val y = cy + star.y * scale * size.minDimension * 0.4f
-            val r = (3.2f - star.mag * 0.35f).coerceAtLeast(0.8f) * scale.coerceAtMost(2f)
+            val x = cx + star.x * scale * dim * 0.4f
+            val y = cy + star.y * scale * dim * 0.4f
+            val r = ((3.2f - star.mag.toFloat() * 0.35f).coerceAtLeast(0.8f)) * scale.coerceAtMost(2f)
             drawCircle(color = star.color, radius = r, center = Offset(x, y))
         }
 
         for (p in planets) {
-            val x = cx + p.x * scale * size.minDimension * 0.4f
-            val y = cy + p.y * scale * size.minDimension * 0.4f
+            val x = cx + p.x * scale * dim * 0.4f
+            val y = cy + p.y * scale * dim * 0.4f
             drawCircle(color = p.color, radius = p.size * scale, center = Offset(x, y))
         }
     }
@@ -188,24 +256,38 @@ fun SkyCanvas(scale: Float, offset: Offset, onTransform: (zoom: Float, pan: Offs
 
 @Composable
 fun NebulaeScreen(onClose: () -> Unit) {
-    Surface(Modifier = Modifier.fillMaxSize(), color = Color.Black) {
-        Column(Modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Color.Black
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
             Row(
-                Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Туманности", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                TextButton(onClick = onClose) { Text("Закрыть") }
+                Text(
+                    text = "Туманности",
+                    color = Color.White,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                TextButton(onClick = onClose) {
+                    Text("Закрыть")
+                }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(12.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 items(NebulaCatalog.all) { nebula ->
                     Column(
-                        Modifier
+                        modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .background(Color.White.copy(0.1f))
+                            .background(Color.White.copy(alpha = 0.1f))
                             .padding(12.dp)
                     ) {
                         AsyncImage(
@@ -217,11 +299,27 @@ fun NebulaeScreen(onClose: () -> Unit) {
                                 .clip(RoundedCornerShape(12.dp)),
                             contentScale = ContentScale.Crop
                         )
-                        Spacer(Modifier.height(8.dp))
-                        Text(nebula.name, color = Color.White, fontWeight = FontWeight.SemiBold)
-                        Text(nebula.type, color = Color.White.copy(0.6f), fontSize = 13.sp)
-                        Text(nebula.description, color = Color.White.copy(0.85f), fontSize = 14.sp)
-                        Text(nebula.credit, color = Color.White.copy(0.4f), fontSize = 11.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = nebula.name,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = nebula.type,
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 13.sp
+                        )
+                        Text(
+                            text = nebula.description,
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = nebula.credit,
+                            color = Color.White.copy(alpha = 0.4f),
+                            fontSize = 11.sp
+                        )
                     }
                 }
             }
