@@ -25,28 +25,35 @@ jobs:
         run: |
           if [ -f gradlew ]; then chmod +x gradlew; fi
 
-      - name: Build APK
+      - name: Build debug APK (auto-signed, installable)
         run: |
           if [ -f gradlew ]; then
-            ./gradlew assembleRelease --no-daemon
+            ./gradlew assembleDebug --no-daemon
           else
-            gradle assembleRelease --no-daemon
+            gradle assembleDebug --no-daemon
           fi
 
-      - name: Find and package APK
+      - name: Package APK
         if: always()
         run: |
           mkdir -p output
-          find . -name "*.apk" -type f 2>/dev/null | head -5
-          APK=$(find . -path "*/release/*.apk" -type f 2>/dev/null | head -1 || true)
+          echo "=== All APKs ==="
+          find . -name "*.apk" -type f 2>/dev/null
+
+          APK=$(find . -path "*/debug/*.apk" -type f 2>/dev/null | head -1 || true)
+          if [ -z "$APK" ]; then
+            APK=$(find . -name "*.apk" -type f 2>/dev/null | head -1 || true)
+          fi
+
           if [ -n "$APK" ]; then
             echo "Found APK: $APK"
-            cp "$APK" output/Ile_Cradle-release.apk
+            cp "$APK" output/Ile_Cradle-debug.apk
             ls -lh output/
+            # show if signed
+            $ANDROID_HOME/build-tools/*/aapt dump badging output/Ile_Cradle-debug.apk 2>/dev/null | head -5 || true
           else
-            echo "No release APK found"
-            find . -name "*.apk" -exec cp {} output/ \; 2>/dev/null || true
-            ls -la output/ || true
+            echo "ERROR: No APK found"
+            ls -la
           fi
 
       - name: Upload Artifact
