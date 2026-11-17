@@ -16,7 +16,7 @@ import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Nightlight
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose..icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -93,7 +93,7 @@ fun LaunchScreen(onFinish: () -> Unit) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                "Astro_Nuit",
+                "Ile_Cradle",
                 color = Color.White.copy(alpha = alpha.value),
                 fontSize = 40.sp,
                 fontWeight = FontWeight.Light
