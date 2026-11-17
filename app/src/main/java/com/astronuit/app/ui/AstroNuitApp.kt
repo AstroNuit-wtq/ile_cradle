@@ -4,14 +4,19 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Nightlight
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,7 +24,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -28,12 +32,10 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.astronuit.app.data.BrightStarCatalog
 import com.astronuit.app.data.NebulaCatalog
-import com.astronuit.app.data.Planet
 import com.astronuit.app.data.PlanetCatalog
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
-import kotlin.math.*
 
 @Composable
 fun AstroNuitApp() {
@@ -44,7 +46,6 @@ fun AstroNuitApp() {
     var offset by remember { mutableStateOf(Offset.Zero) }
 
     Box(Modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // Sky
         SkyCanvas(
             scale = scale,
             offset = offset,
@@ -54,7 +55,6 @@ fun AstroNuitApp() {
             }
         )
 
-        // UI
         Column(
             Modifier
                 .fillMaxSize()
@@ -80,7 +80,7 @@ fun AstroNuitApp() {
 }
 
 @Composable
-fun LaunchScreen(onFinish: () -> Void) {
+fun LaunchScreen(onFinish: () -> Unit) {
     val alpha = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
         alpha.animateTo(1f, tween(1200))
@@ -88,9 +88,7 @@ fun LaunchScreen(onFinish: () -> Void) {
         onFinish()
     }
     Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black),
+        Modifier.fillMaxSize().background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -106,27 +104,6 @@ fun LaunchScreen(onFinish: () -> Void) {
                 color = Color.White.copy(alpha = 0.6f * alpha.value),
                 fontSize = 14.sp
             )
-        }
-    }
-}
-
-// Fix type for onFinish
-@Composable
-fun LaunchScreen(onFinish: () -> Unit) {
-    val alpha = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        alpha.animateTo(1f, tween(1200))
-        delay(800)
-        onFinish()
-    }
-    Box(
-        Modifier.fillMaxSize().background(Color.Black),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Astro_Nuit", color = Color.White.copy(alpha = alpha.value), fontSize = 40.sp, fontWeight = FontWeight.Light)
-            Spacer(Modifier.height(12.dp))
-            Text("Исследуй ночное небо", color = Color.White.copy(alpha = 0.6f * alpha.value), fontSize = 14.sp)
         }
     }
 }
@@ -194,7 +171,6 @@ fun SkyCanvas(scale: Float, offset: Offset, onTransform: (zoom: Float, pan: Offs
         val cx = size.width / 2 + offset.x
         val cy = size.height / 2 + offset.y
 
-        // Stars
         for (star in stars) {
             val x = cx + star.x * scale * size.minDimension * 0.4f
             val y = cy + star.y * scale * size.minDimension * 0.4f
@@ -202,7 +178,6 @@ fun SkyCanvas(scale: Float, offset: Offset, onTransform: (zoom: Float, pan: Offs
             drawCircle(color = star.color, radius = r, center = Offset(x, y))
         }
 
-        // Planets
         for (p in planets) {
             val x = cx + p.x * scale * size.minDimension * 0.4f
             val y = cy + p.y * scale * size.minDimension * 0.4f
