@@ -1,7 +1,6 @@
 package com.diplomka.app.ui
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
@@ -181,7 +180,7 @@ fun DroneNavigationScreen(hasLocation: Boolean) {
             }
         }
         try {
-            @SuppressLint("MissingPermission")
+            // Permission already checked via hasLocation / runtime grants
             client.requestLocationUpdates(request, callback, context.mainLooper)
         } catch (e: SecurityException) {
             Log.e("Diplomka", "Location permission missing", e)
