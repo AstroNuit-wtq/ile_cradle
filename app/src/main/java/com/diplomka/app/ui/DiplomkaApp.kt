@@ -20,6 +20,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -37,9 +38,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -71,15 +75,9 @@ import kotlin.math.*
 @Composable
 fun DiplomkaApp() {
     val permissions = rememberMultiplePermissionsState(
-        listOf(
-            Manifest.permission.CAMERA,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        )
+        listOf(Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
     )
-    LaunchedEffect(Unit) {
-        if (!permissions.allPermissionsGranted) permissions.launchMultiplePermissionRequest()
-    }
+    LaunchedEffect(Unit) { if (!permissions.allPermissionsGranted) permissions.launchMultiplePermissionRequest() }
     val hasCamera = permissions.permissions.any { it.status.isGranted && it.permission == Manifest.permission.CAMERA }
     val hasLocation = permissions.permissions.any {
         it.status.isGranted && (it.permission == Manifest.permission.ACCESS_FINE_LOCATION || it.permission == Manifest.permission.ACCESS_COARSE_LOCATION)
@@ -109,6 +107,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     var showMap by remember { mutableStateOf(false) }
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var videoPlaying by remember { mutableStateOf(false) }
+    var videoFrame by remember { mutableStateOf<Bitmap?>(null) }
 
     var myLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var myBearing by remember { mutableStateOf(0f) }
@@ -174,7 +173,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             videoUri = uri; sourceMode = SourceMode.VIDEO; videoPlaying = true
-            pipeline.reset(); result = null
+            pipeline.reset(); result = null; videoFrame = null
         }
     }
 
@@ -191,7 +190,12 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                     val frame = retriever.getFrameAtTime(t * 1000, MediaMetadataRetriever.OPTION_CLOSEST)
                     if (frame != null) {
                         val r = pipeline.process(frame)
-                        withContext(Dispatchers.Main) { result = r }
+                        val display = frame.copy(Bitmap.Config.ARGB_8888, false)
+                        withContext(Dispatchers.Main) {
+                            result = r
+                            videoFrame?.recycle()
+                            videoFrame = display
+                        }
                         frame.recycle()
                     }
                     t += 120L
@@ -219,7 +223,12 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                 }
                 sourceMode == SourceMode.VIDEO -> {
                     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
-                        Text(if (videoPlaying) "Анализ видео…" else "Видео на паузе", color = Color.White)
+                        val vf = videoFrame
+                        if (vf != null) {
+                            Image(bitmap = vf.asImageBitmap(), contentDescription = "video", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        } else {
+                            Text(if (videoPlaying) "Анализ видео…" else "Видео на паузе", color = Color.White)
+                        }
                     }
                 }
                 else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -243,6 +252,11 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                 Text("Компас: ${myBearing.toInt()}°" + (myLocation?.let { " | GPS " + String.format("%.4f", it.lat) + ", " + String.format("%.4f", it.lon) } ?: " | GPS —"), color = Color(0xFF8B949E), fontSize = 10.sp)
                 if (destination != null) {
                     Text("Маршрут: " + String.format("%.0f", routeDistanceM) + " м | $turnHint", color = Color(0xFF7EE787), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
+                result?.let { r ->
+                    if (r.nearestDistanceM > 0) {
+                        Text("До объекта ≈ " + String.format("%.1f", r.nearestDistanceM) + " м | " + r.bypassHint, color = Color(0xFFFFD700), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
                 Text("Источник: " + (if (sourceMode == SourceMode.CAMERA) "камера" else "видео") + if (strictStop) " | STOP вкл" else " | STOP выкл", color = Color(0xFF8B949E), fontSize = 10.sp)
             }
@@ -313,8 +327,11 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                     WebView(ctx).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
+                        settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        settings.loadWithOverviewMode = true
+                        settings.useWideViewPort = true
                         webViewClient = WebViewClient()
-                        loadUrl("https://yandex.ru/maps/?rtext=$lat,$lon~$dlat,$dlon&rtt=auto")
+                        loadUrl("https://yandex.ru/maps/?ll=$lon%2C$lat&z=15&rtext=${lat}%2C${lon}~${dlat}%2C${dlon}&rtt=auto")
                     }
                 }, modifier = Modifier.fillMaxSize())
             }
@@ -370,16 +387,39 @@ fun CommandLogPanel(commands: List<DroneVisionPipeline.NavigationCommand>, turnH
 }
 
 @Composable
-fun DetectionOverlay(detections: List<DroneVisionPipeline.Detection>, targetX: Float, targetY: Float, stopSignal: Boolean, autoRotateAngle: Float, showCompass: Boolean, modifier: Modifier = Modifier) {
+fun DetectionOverlay(
+    detections: List<DroneVisionPipeline.Detection>,
+    targetX: Float, targetY: Float, stopSignal: Boolean,
+    autoRotateAngle: Float, showCompass: Boolean, modifier: Modifier = Modifier
+) {
     Canvas(modifier = modifier) {
         val w = size.width; val h = size.height
+        val paint = android.graphics.Paint().apply { textSize = 28f; isAntiAlias = true }
         for (d in detections) {
             val color = when (d.type) { "motion" -> Color(0xFFFF66FF); "obstacle" -> Color(0xFFFFAA33); else -> Color.White }
-            val left = d.rect.left.coerceIn(0f, w); val top = d.rect.top.coerceIn(0f, h)
-            val right = d.rect.right.coerceIn(0f, w); val bottom = d.rect.bottom.coerceIn(0f, h)
+            val left = d.rect.left.coerceIn(0f, w)
+            val top = d.rect.top.coerceIn(0f, h)
+            val right = d.rect.right.coerceIn(0f, w)
+            val bottom = d.rect.bottom.coerceIn(0f, h)
             if (right - left < 4 || bottom - top < 4) continue
-            drawRect(color.copy(alpha = 0.18f), Offset(left, top), Size(right - left, bottom - top))
-            drawRect(color, Offset(left, top), Size(right - left, bottom - top), style = Stroke(2f))
+            drawRect(color.copy(alpha = 0.22f), Offset(left, top), Size(right - left, bottom - top))
+            drawRect(color, Offset(left, top), Size(right - left, bottom - top), style = Stroke(3.5f))
+            val cLen = minOf(18f, (right - left) / 3f, (bottom - top) / 3f)
+            drawLine(color, Offset(left, top), Offset(left + cLen, top), 4f)
+            drawLine(color, Offset(left, top), Offset(left, top + cLen), 4f)
+            drawLine(color, Offset(right, top), Offset(right - cLen, top), 4f)
+            drawLine(color, Offset(right, top), Offset(right, top + cLen), 4f)
+            drawLine(color, Offset(left, bottom), Offset(left + cLen, bottom), 4f)
+            drawLine(color, Offset(left, bottom), Offset(left, bottom - cLen), 4f)
+            drawLine(color, Offset(right, bottom), Offset(right - cLen, bottom), 4f)
+            drawLine(color, Offset(right, bottom), Offset(right, bottom - cLen), 4f)
+            if (d.distanceM > 0) {
+                val label = String.format("%.1f м", d.distanceM)
+                paint.color = android.graphics.Color.BLACK
+                drawContext.canvas.nativeCanvas.drawText(label, left + 4f, (top - 6f).coerceAtLeast(24f), paint)
+                paint.color = android.graphics.Color.YELLOW
+                drawContext.canvas.nativeCanvas.drawText(label, left + 3f, (top - 7f).coerceAtLeast(23f), paint)
+            }
         }
         val tx = targetX * w; val ty = targetY * h
         drawCircle(Color(0xFF00FF88), 8f, Offset(tx, ty))
@@ -387,7 +427,9 @@ fun DetectionOverlay(detections: List<DroneVisionPipeline.Detection>, targetX: F
         if (showCompass) {
             val cx = w / 2f; val cy = h * 0.8f
             rotate(degrees = autoRotateAngle, pivot = Offset(cx, cy)) {
-                val path = Path().apply { moveTo(cx, cy - 36f); lineTo(cx - 14f, cy + 18f); lineTo(cx, cy + 6f); lineTo(cx + 14f, cy + 18f); close() }
+                val path = Path().apply {
+                    moveTo(cx, cy - 36f); lineTo(cx - 14f, cy + 18f); lineTo(cx, cy + 6f); lineTo(cx + 14f, cy + 18f); close()
+                }
                 drawPath(path, Color(0xFFFFD700))
             }
             drawCircle(Color(0x55FFD700), 42f, Offset(cx, cy), style = Stroke(1.5f))
@@ -397,7 +439,10 @@ fun DetectionOverlay(detections: List<DroneVisionPipeline.Detection>, targetX: F
 }
 
 @Composable
-fun StableCameraPreview(lifecycleOwner: LifecycleOwner, isRunning: Boolean, analysisExecutor: java.util.concurrent.Executor, cameraBound: AtomicBoolean, onFrame: (Bitmap) -> Unit) {
+fun StableCameraPreview(
+    lifecycleOwner: LifecycleOwner, isRunning: Boolean,
+    analysisExecutor: java.util.concurrent.Executor, cameraBound: AtomicBoolean, onFrame: (Bitmap) -> Unit
+) {
     val context = LocalContext.current
     val previewView = remember {
         PreviewView(context).apply {
