@@ -1,13 +1,20 @@
 package com.diplomka.app.ui
 
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.location.Location
 import android.util.Log
 import android.view.ViewGroup
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,7 +32,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -38,22 +47,42 @@ import androidx.lifecycle.LifecycleOwner
 import com.diplomka.app.vision.DroneVisionPipeline
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
-import com.google.accompanist.permissions.rememberPermissionState
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.*
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun DiplomkaApp() {
-    val cameraPermission = rememberPermissionState(android.Manifest.permission.CAMERA)
+    val permissions = rememberMultiplePermissionsState(
+        listOf(
+            Manifest.permission.CAMERA,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+    )
 
     LaunchedEffect(Unit) {
-        if (!cameraPermission.status.isGranted) {
-            cameraPermission.launchPermissionRequest()
+        if (!permissions.allPermissionsGranted) {
+            permissions.launchMultiplePermissionRequest()
         }
     }
 
-    if (cameraPermission.status.isGranted) {
-        DroneNavigationScreen()
+    if (permissions.permissions.any { it.status.isGranted && it.permission == Manifest.permission.CAMERA }) {
+        DroneNavigationScreen(
+            hasLocation = permissions.permissions.any {
+                it.status.isGranted && (
+                    it.permission == Manifest.permission.ACCESS_FINE_LOCATION ||
+                        it.permission == Manifest.permission.ACCESS_COARSE_LOCATION
+                    )
+            }
+        )
     } else {
         Box(
             Modifier.fillMaxSize().background(Color(0xFF0D1117)),
@@ -62,46 +91,123 @@ fun DiplomkaApp() {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Нужен доступ к камере", color = Color.White, fontSize = 18.sp)
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { cameraPermission.launchPermissionRequest() }) {
-                    Text("Разрешить камеру")
+                Button(onClick = { permissions.launchMultiplePermissionRequest() }) {
+                    Text("Разрешить")
                 }
             }
         }
     }
 }
 
+data class GeoPoint(val lat: Double, val lon: Double)
+
 @Composable
-fun DroneNavigationScreen() {
+fun DroneNavigationScreen(hasLocation: Boolean) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val pipeline = remember { DroneVisionPipeline() }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val lastUiUpdate = remember { AtomicLong(0L) }
 
     var result by remember { mutableStateOf<DroneVisionPipeline.FrameResult?>(null) }
     var showLog by remember { mutableStateOf(true) }
     var isRunning by remember { mutableStateOf(true) }
+    var autoRotate by remember { mutableStateOf(true) }
 
-    val borderColor by animateColorAsState(
-        if (result?.stopSignal == true) Color(0xFFDA3633) else Color(0xFF238636),
-        label = "border"
-    )
+    var myLocation by remember { mutableStateOf<GeoPoint?>(null) }
+    var myBearing by remember { mutableStateOf(0f) }
+    var destination by remember { mutableStateOf<GeoPoint?>(null) }
+    var routeDistanceM by remember { mutableStateOf(0f) }
+    var bearingToDest by remember { mutableStateOf(0f) }
+    var turnHint by remember { mutableStateOf("—") }
+
+    DisposableEffect(Unit) {
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val accel = FloatArray(3)
+        val magnet = FloatArray(3)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                when (event.sensor.type) {
+                    Sensor.TYPE_ACCELEROMETER -> System.arraycopy(event.values, 0, accel, 0, 3)
+                    Sensor.TYPE_MAGNETIC_FIELD -> System.arraycopy(event.values, 0, magnet, 0, 3)
+                }
+                val R = FloatArray(9)
+                val I = FloatArray(9)
+                if (SensorManager.getRotationMatrix(R, I, accel, magnet)) {
+                    val orient = FloatArray(3)
+                    SensorManager.getOrientation(R, orient)
+                    val deg = Math.toDegrees(orient[0].toDouble()).toFloat()
+                    myBearing = ((deg + 360f) % 360f)
+                }
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+            sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+        sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)?.let {
+            sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+        onDispose { sm.unregisterListener(listener) }
+    }
+
+    DisposableEffect(hasLocation) {
+        if (!hasLocation) return@DisposableEffect onDispose {}
+        val client = LocationServices.getFusedLocationProviderClient(context)
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1500L)
+            .setMinUpdateIntervalMillis(1000L)
+            .build()
+        val callback = object : LocationCallback() {
+            override fun onLocationResult(lr: LocationResult) {
+                val loc = lr.lastLocation ?: return
+                myLocation = GeoPoint(loc.latitude, loc.longitude)
+                destination?.let { dest ->
+                    val results = FloatArray(3)
+                    Location.distanceBetween(
+                        loc.latitude, loc.longitude,
+                        dest.lat, dest.lon,
+                        results
+                    )
+                    routeDistanceM = results[0]
+                    bearingToDest = results[1]
+                    val heading = if (loc.hasBearing() && loc.speed > 0.8f) loc.bearing else myBearing
+                    val delta = ((bearingToDest - heading + 540f) % 360f) - 180f
+                    turnHint = when {
+                        abs(delta) < 20f -> "ПРЯМО"
+                        delta > 0 -> "ВПРАВО ${delta.toInt()}°"
+                        else -> "ВЛЕВО ${(-delta).toInt()}°"
+                    }
+                }
+            }
+        }
+        try {
+            @SuppressLint("MissingPermission")
+            client.requestLocationUpdates(request, callback, context.mainLooper)
+        } catch (e: SecurityException) {
+            Log.e("Diplomka", "Location permission missing", e)
+        }
+        onDispose { client.removeLocationUpdates(callback) }
+    }
+
+    val borderColor = if (result?.stopSignal == true) Color(0xFFDA3633) else Color(0xFF238636)
 
     Box(Modifier.fillMaxSize().background(Color(0xFF0D1117))) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(if (showLog) 0.62f else 1f)
-                .border(4.dp, borderColor)
+                .fillMaxHeight(if (showLog) 0.58f else 1f)
+                .border(3.dp, borderColor)
         ) {
             CameraPreviewWithAnalysis(
                 lifecycleOwner = lifecycleOwner,
                 isRunning = isRunning,
                 analysisExecutor = analysisExecutor,
                 onFrame = { bitmap ->
-                    if (isRunning) {
-                        val r = pipeline.process(bitmap)
-                        result = r
-                    }
+                    if (!isRunning) return@CameraPreviewWithAnalysis
+                    val now = System.currentTimeMillis()
+                    if (now - lastUiUpdate.get() < 200) return@CameraPreviewWithAnalysis
+                    lastUiUpdate.set(now)
+                    result = pipeline.process(bitmap)
                 }
             )
 
@@ -111,6 +217,10 @@ fun DroneNavigationScreen() {
                     targetX = r.targetX,
                     targetY = r.targetY,
                     stopSignal = r.stopSignal,
+                    autoRotateAngle = if (autoRotate) {
+                        ((bearingToDest - myBearing + 360f) % 360f)
+                    } else 0f,
+                    showCompass = destination != null,
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -118,26 +228,32 @@ fun DroneNavigationScreen() {
             Column(
                 Modifier
                     .align(Alignment.TopStart)
-                    .padding(12.dp)
+                    .padding(10.dp)
                     .background(Color(0xCC0D1117), RoundedCornerShape(8.dp))
                     .padding(10.dp)
             ) {
-                Text(
-                    "DIPLOMKA — Drone Delivery Sim",
-                    color = Color(0xFF58A6FF),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
-                )
+                Text("DIPLOMKA", color = Color(0xFF58A6FF), fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 result?.let { r ->
                     Text(
-                        "Скорость: " + String.format("%.1f", r.estimatedSpeedMps) + " м/с  •  Путь: " + String.format("%.1f", r.totalDistanceM) + " м",
+                        "CV: " + String.format("%.1f", r.estimatedSpeedMps) + " м/с | " +
+                            String.format("%.0f", r.totalDistanceM) + " м | " + r.weather,
                         color = Color(0xFFE6EDF3),
-                        fontSize = 12.sp
-                    )
-                    Text(
-                        "Погода: ${r.weather}",
-                        color = Color(0xFF8B949E),
                         fontSize = 11.sp
+                    )
+                }
+                myLocation?.let { loc ->
+                    Text(
+                        "GPS: " + String.format("%.5f", loc.lat) + ", " + String.format("%.5f", loc.lon),
+                        color = Color(0xFF8B949E),
+                        fontSize = 10.sp
+                    )
+                }
+                if (destination != null) {
+                    Text(
+                        "До цели: " + String.format("%.0f", routeDistanceM) + " м | $turnHint",
+                        color = Color(0xFF7EE787),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
             }
@@ -149,49 +265,71 @@ fun DroneNavigationScreen() {
                         .background(Color(0xAA000000), RoundedCornerShape(12.dp))
                         .padding(horizontal = 24.dp, vertical = 12.dp)
                 ) {
-                    Text(
-                        "СТОП!",
-                        color = Color(0xFFFF6B6B),
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Black
-                    )
+                    Text("СТОП!", color = Color(0xFFFF6B6B), fontSize = 32.sp, fontWeight = FontWeight.Black)
                 }
             }
 
-            Row(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Column(
+                Modifier.align(Alignment.BottomEnd).padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalAlignment = Alignment.End
             ) {
                 FilledTonalButton(
-                    onClick = { showLog = !showLog },
-                    colors = ButtonDefaults.filledTonalButtonColors(
-                        containerColor = Color(0xFF21262D)
-                    )
+                    onClick = {
+                        myLocation?.let { loc ->
+                            val dist = 300.0
+                            val brng = Math.toRadians(myBearing.toDouble())
+                            val R = 6371000.0
+                            val lat1 = Math.toRadians(loc.lat)
+                            val lon1 = Math.toRadians(loc.lon)
+                            val lat2 = asin(sin(lat1) * cos(dist / R) + cos(lat1) * sin(dist / R) * cos(brng))
+                            val lon2 = lon1 + atan2(
+                                sin(brng) * sin(dist / R) * cos(lat1),
+                                cos(dist / R) - sin(lat1) * sin(lat2)
+                            )
+                            destination = GeoPoint(Math.toDegrees(lat2), Math.toDegrees(lon2))
+                        }
+                    },
+                    colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF21262D))
                 ) {
-                    Icon(
-                        if (showLog) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        contentDescription = null,
-                        tint = Color.White
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (showLog) "Скрыть лог" else "Лог", color = Color.White)
+                    Icon(Icons.Default.Flag, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Цель 300м", color = Color.White, fontSize = 12.sp)
                 }
                 FilledTonalButton(
-                    onClick = {
-                        isRunning = !isRunning
-                        if (!isRunning) pipeline.reset()
-                    },
+                    onClick = { autoRotate = !autoRotate },
                     colors = ButtonDefaults.filledTonalButtonColors(
-                        containerColor = if (isRunning) Color(0xFFDA3633) else Color(0xFF238636)
+                        containerColor = if (autoRotate) Color(0xFF238636) else Color(0xFF21262D)
                     )
                 ) {
-                    Icon(
-                        if (isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        tint = Color.White
-                    )
+                    Icon(Icons.Default.Explore, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (autoRotate) "Авто-поворот" else "Компас выкл", color = Color.White, fontSize = 12.sp)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilledTonalButton(
+                        onClick = { showLog = !showLog },
+                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF21262D))
+                    ) {
+                        Icon(
+                            if (showLog) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            null, tint = Color.White, modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            isRunning = !isRunning
+                            if (!isRunning) pipeline.reset()
+                        },
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = if (isRunning) Color(0xFFDA3633) else Color(0xFF238636)
+                        )
+                    ) {
+                        Icon(
+                            if (isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            null, tint = Color.White, modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
         }
@@ -199,10 +337,12 @@ fun DroneNavigationScreen() {
         if (showLog) {
             CommandLogPanel(
                 commands = result?.commands ?: emptyList(),
+                turnHint = if (destination != null) turnHint else null,
+                routeDistanceM = if (destination != null) routeDistanceM else null,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .fillMaxHeight(0.38f)
+                    .fillMaxHeight(0.42f)
             )
         }
     }
@@ -211,37 +351,42 @@ fun DroneNavigationScreen() {
 @Composable
 fun CommandLogPanel(
     commands: List<DroneVisionPipeline.NavigationCommand>,
+    turnHint: String?,
+    routeDistanceM: Float?,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
+    val firstTs = commands.firstOrNull()?.timestamp
 
-    LaunchedEffect(commands.firstOrNull()?.timestamp) {
+    LaunchedEffect(firstTs) {
         if (commands.isNotEmpty()) {
-            listState.animateScrollToItem(0)
+            try { listState.animateScrollToItem(0) } catch (_: Exception) {}
         }
     }
 
     Column(
-        modifier
-            .background(Color(0xFF161B22))
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+        modifier.background(Color(0xFF161B22)).padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Terminal, null, tint = Color(0xFF58A6FF), modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
+            Text("Команды (реальное время)", color = Color(0xFF58A6FF), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+        if (turnHint != null && routeDistanceM != null) {
             Text(
-                "Команды в реальном времени (не муляж)",
-                color = Color(0xFF58A6FF),
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 13.sp
+                "Навигация GPS: $turnHint · " + String.format("%.0f", routeDistanceM) + " м до цели",
+                color = Color(0xFF7EE787),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(top = 4.dp)
             )
         }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(4.dp))
         Divider(color = Color(0xFF30363D))
         Spacer(Modifier.height(4.dp))
 
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-            items(commands) { cmd ->
+            items(commands, key = { it.timestamp.toString() + it.text }) { cmd ->
                 val color = when (cmd.severity) {
                     DroneVisionPipeline.NavigationCommand.Severity.STOP -> Color(0xFFFF7B72)
                     DroneVisionPipeline.NavigationCommand.Severity.WARN -> Color(0xFFD29922)
@@ -266,6 +411,8 @@ fun DetectionOverlay(
     targetX: Float,
     targetY: Float,
     stopSignal: Boolean,
+    autoRotateAngle: Float,
+    showCompass: Boolean,
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier = modifier) {
@@ -276,41 +423,40 @@ fun DetectionOverlay(
             val color = when (d.type) {
                 "person" -> Color(0xFFFF4444)
                 "vehicle" -> Color(0xFF4488FF)
-                "building" -> Color(0xFFFFCC00)
-                "motion" -> Color(0xFFFF66FF)
                 else -> Color.White
             }
-            val left = d.rect.left
-            val top = d.rect.top
-            val right = d.rect.right
-            val bottom = d.rect.bottom
-
-            drawRect(
-                color = color.copy(alpha = 0.25f),
-                topLeft = Offset(left, top),
-                size = Size((right - left).coerceAtLeast(8f), (bottom - top).coerceAtLeast(8f))
-            )
-            drawRect(
-                color = color,
-                topLeft = Offset(left, top),
-                size = Size((right - left).coerceAtLeast(8f), (bottom - top).coerceAtLeast(8f)),
-                style = Stroke(width = 3f)
-            )
+            val left = d.rect.left.coerceIn(0f, w)
+            val top = d.rect.top.coerceIn(0f, h)
+            val right = d.rect.right.coerceIn(0f, w)
+            val bottom = d.rect.bottom.coerceIn(0f, h)
+            if (right - left < 4 || bottom - top < 4) continue
+            drawRect(color = color.copy(alpha = 0.2f), topLeft = Offset(left, top), size = Size(right - left, bottom - top))
+            drawRect(color = color, topLeft = Offset(left, top), size = Size(right - left, bottom - top), style = Stroke(width = 2.5f))
         }
 
         val tx = targetX * w
         val ty = targetY * h
-        drawCircle(Color(0xFF00FF88), radius = 14f, center = Offset(tx, ty))
-        drawCircle(Color.White, radius = 6f, center = Offset(tx, ty))
-        val start = Offset(w / 2f, h * 0.92f)
-        drawLine(Color(0xFF00FF88), start, Offset(tx, ty), strokeWidth = 4f)
+        drawCircle(Color(0xFF00FF88), radius = 10f, center = Offset(tx, ty))
+        drawLine(Color(0xFF00FF88), Offset(w / 2f, h * 0.92f), Offset(tx, ty), strokeWidth = 3f)
+
+        if (showCompass) {
+            val cx = w / 2f
+            val cy = h * 0.78f
+            rotate(degrees = autoRotateAngle, pivot = Offset(cx, cy)) {
+                val path = Path().apply {
+                    moveTo(cx, cy - 40f)
+                    lineTo(cx - 18f, cy + 22f)
+                    lineTo(cx, cy + 8f)
+                    lineTo(cx + 18f, cy + 22f)
+                    close()
+                }
+                drawPath(path, Color(0xFFFFD700))
+            }
+            drawCircle(Color(0x66FFD700), radius = 48f, center = Offset(cx, cy), style = Stroke(2f))
+        }
 
         if (stopSignal) {
-            drawRect(
-                color = Color(0x44FF0000),
-                topLeft = Offset(0f, 0f),
-                size = Size(w, h)
-            )
+            drawRect(Color(0x33FF0000), Offset.Zero, Size(w, h))
         }
     }
 }
@@ -334,10 +480,10 @@ fun CameraPreviewWithAnalysis(
         }
     }
 
-    AndroidView(
-        factory = { previewView },
-        modifier = Modifier.fillMaxSize()
-    ) { view ->
+    val runningState = rememberUpdatedState(isRunning)
+    val onFrameState = rememberUpdatedState(onFrame)
+
+    AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize()) { view ->
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
@@ -354,7 +500,7 @@ fun CameraPreviewWithAnalysis(
                 .build()
 
             analysis.setAnalyzer(analysisExecutor) { imageProxy ->
-                if (!isRunning) {
+                if (!runningState.value) {
                     imageProxy.close()
                     return@setAnalyzer
                 }
@@ -365,8 +511,7 @@ fun CameraPreviewWithAnalysis(
                         val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
                         Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
                     } else bitmap
-
-                    onFrame(finalBitmap)
+                    onFrameState.value(finalBitmap)
                 } catch (e: Exception) {
                     Log.e("Diplomka", "Analysis error", e)
                 } finally {
