@@ -130,7 +130,7 @@ fun DroneNavigationScreen() {
                 )
                 result?.let { r ->
                     Text(
-                        "Скорость: ${\"%.1f\".format(r.estimatedSpeedMps)} м/с  •  Путь: ${\"%.1f\".format(r.totalDistanceM)} м",
+                        "Скорость: " + String.format("%.1f", r.estimatedSpeedMps) + " м/с  •  Путь: " + String.format("%.1f", r.totalDistanceM) + " м",
                         color = Color(0xFFE6EDF3),
                         fontSize = 12.sp
                     )
