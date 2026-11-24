@@ -39,11 +39,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
@@ -102,12 +102,15 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     var showLog by remember { mutableStateOf(true) }
     var isRunning by remember { mutableStateOf(true) }
     var autoRotate by remember { mutableStateOf(true) }
-    var strictStop by remember { mutableStateOf(false) }
+    var strictStop by remember { mutableStateOf(true) }
+    var forceStop by remember { mutableStateOf(false) }
     var sourceMode by remember { mutableStateOf(SourceMode.CAMERA) }
     var showMap by remember { mutableStateOf(false) }
+    var mapOffline by remember { mutableStateOf(true) }
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var videoPlaying by remember { mutableStateOf(false) }
     var videoFrame by remember { mutableStateOf<Bitmap?>(null) }
+    var offlineMapUri by remember { mutableStateOf<Uri?>(null) }
 
     var myLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var myBearing by remember { mutableStateOf(0f) }
@@ -117,6 +120,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     var turnHint by remember { mutableStateOf("—") }
 
     LaunchedEffect(strictStop) { pipeline.strictStopEnabled = strictStop }
+    LaunchedEffect(forceStop) { pipeline.forceStop = forceStop }
 
     DisposableEffect(Unit) {
         val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -176,6 +180,9 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
             pipeline.reset(); result = null; videoFrame = null
         }
     }
+    val mapFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) { offlineMapUri = uri; mapOffline = true; showMap = true }
+    }
 
     LaunchedEffect(videoUri, videoPlaying, sourceMode) {
         if (sourceMode != SourceMode.VIDEO || videoUri == null || !videoPlaying) return@LaunchedEffect
@@ -191,11 +198,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                     if (frame != null) {
                         val r = pipeline.process(frame)
                         val display = frame.copy(Bitmap.Config.ARGB_8888, false)
-                        withContext(Dispatchers.Main) {
-                            result = r
-                            videoFrame?.recycle()
-                            videoFrame = display
-                        }
+                        withContext(Dispatchers.Main) { result = r; videoFrame?.recycle(); videoFrame = display }
                         frame.recycle()
                     }
                     t += 120L
@@ -207,7 +210,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
         }
     }
 
-    val borderColor = if (result?.stopSignal == true) Color(0xFFDA3633) else Color(0xFF238636)
+    val borderColor = if (result?.stopSignal == true || forceStop) Color(0xFFDA3633) else Color(0xFF238636)
 
     Box(Modifier.fillMaxSize().background(Color(0xFF0D1117))) {
         Box(Modifier.fillMaxWidth().fillMaxHeight(if (showLog) 0.56f else 1f).border(3.dp, borderColor)) {
@@ -216,7 +219,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                     StableCameraPreview(lifecycleOwner, isRunning, analysisExecutor, cameraBound) { bitmap ->
                         if (!isRunning) return@StableCameraPreview
                         val now = System.currentTimeMillis()
-                        if (now - lastUiUpdate.get() < 250) return@StableCameraPreview
+                        if (now - lastUiUpdate.get() < 200) return@StableCameraPreview
                         lastUiUpdate.set(now)
                         result = pipeline.process(bitmap)
                     }
@@ -224,23 +227,19 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                 sourceMode == SourceMode.VIDEO -> {
                     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
                         val vf = videoFrame
-                        if (vf != null) {
-                            Image(bitmap = vf.asImageBitmap(), contentDescription = "video", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                        } else {
-                            Text(if (videoPlaying) "Анализ видео…" else "Видео на паузе", color = Color.White)
-                        }
+                        if (vf != null) Image(bitmap = vf.asImageBitmap(), contentDescription = "video", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        else Text(if (videoPlaying) "Анализ видео…" else "Видео на паузе", color = Color.White)
                     }
                 }
-                else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Нет камеры — выберите видео", color = Color.White)
-                }
+                else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Нет камеры — выберите видео", color = Color.White) }
             }
 
             result?.let { r ->
                 DetectionOverlay(
-                    r.detections, r.targetX, r.targetY, r.stopSignal,
-                    if (autoRotate && destination != null) ((bearingToDest - myBearing + 360f) % 360f) else myBearing,
-                    true, Modifier.fillMaxSize()
+                    detections = r.detections, targetX = r.targetX, targetY = r.targetY, stopSignal = r.stopSignal,
+                    nnPoint = r.nnNextPoint,
+                    autoRotateAngle = if (autoRotate && destination != null) ((bearingToDest - myBearing + 360f) % 360f) else myBearing,
+                    showCompass = true, modifier = Modifier.fillMaxSize()
                 )
             }
 
@@ -257,13 +256,14 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                     if (r.nearestDistanceM > 0) {
                         Text("До объекта ≈ " + String.format("%.1f", r.nearestDistanceM) + " м | " + r.bypassHint, color = Color(0xFFFFD700), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     }
+                    Text("NN сектор: " + String.format("%+.0f", r.freeSectorDeg) + "°", color = Color(0xFF79C0FF), fontSize = 10.sp)
                 }
-                Text("Источник: " + (if (sourceMode == SourceMode.CAMERA) "камера" else "видео") + if (strictStop) " | STOP вкл" else " | STOP выкл", color = Color(0xFF8B949E), fontSize = 10.sp)
+                Text("Источник: " + (if (sourceMode == SourceMode.CAMERA) "камера" else "видео") + if (strictStop) " | STOP авто" else " | STOP выкл", color = Color(0xFF8B949E), fontSize = 10.sp)
             }
 
-            if (result?.stopSignal == true) {
+            if (result?.stopSignal == true || forceStop) {
                 Box(Modifier.align(Alignment.Center).background(Color(0xAA000000), RoundedCornerShape(12.dp)).padding(horizontal = 20.dp, vertical = 10.dp)) {
-                    Text("СТОП!", color = Color(0xFFFF6B6B), fontSize = 28.sp, fontWeight = FontWeight.Black)
+                    Text(if (forceStop) "СТОП (ручной)" else "СТОП!", color = Color(0xFFFF6B6B), fontSize = 28.sp, fontWeight = FontWeight.Black)
                 }
             }
 
@@ -284,10 +284,16 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                     SmallBtn(if (autoRotate) "Авто" else "Курс", Icons.Default.Explore) { autoRotate = !autoRotate }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    SmallBtn(if (strictStop) "STOP+" else "STOP−", Icons.Default.Warning) {
-                        strictStop = !strictStop
-                        if (!strictStop) pipeline.reset()
+                    FilledTonalButton(
+                        onClick = { forceStop = !forceStop; pipeline.forceStop = forceStop },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (forceStop) Color(0xFFDA3633) else Color(0xFF6E2A2A))
+                    ) {
+                        Icon(Icons.Default.Stop, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (forceStop) "СТОП ВКЛ" else "СТОП", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
+                    SmallBtn(if (strictStop) "Авто+" else "Авто−", Icons.Default.Warning) { strictStop = !strictStop }
                     SmallBtn(if (showLog) "Лог" else "Лог+", Icons.Default.Terminal) { showLog = !showLog }
                     FilledTonalButton(
                         onClick = {
@@ -316,24 +322,78 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
 
     if (showMap) {
         ModalBottomSheet(onDismissRequest = { showMap = false }) {
-            Column(Modifier.fillMaxWidth().height(420.dp).padding(8.dp)) {
-                Text("Маршрут (Yandex Maps)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Column(Modifier.fillMaxWidth().height(460.dp).padding(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Карта", fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { mapOffline = !mapOffline }) { Text(if (mapOffline) "Оффлайн" else "Онлайн") }
+                    TextButton(onClick = { mapFilePicker.launch("*/*") }) { Text("Файл") }
+                }
                 Spacer(Modifier.height(6.dp))
-                val lat = myLocation?.lat ?: 55.751244
-                val lon = myLocation?.lon ?: 37.618423
-                val dlat = destination?.lat ?: lat
-                val dlon = destination?.lon ?: lon
-                AndroidView(factory = { ctx ->
-                    WebView(ctx).apply {
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                        settings.loadWithOverviewMode = true
-                        settings.useWideViewPort = true
-                        webViewClient = WebViewClient()
-                        loadUrl("https://yandex.ru/maps/?ll=$lon%2C$lat&z=15&rtext=${lat}%2C${lon}~${dlat}%2C${dlon}&rtt=auto")
-                    }
-                }, modifier = Modifier.fillMaxSize())
+                if (mapOffline) {
+                    OfflineNavMap(myLocation, destination, myBearing, result?.freeSectorDeg ?: 0f, result?.nearestDistanceM ?: -1f, offlineMapUri, Modifier.fillMaxSize())
+                } else {
+                    val lat = myLocation?.lat ?: 55.751244
+                    val lon = myLocation?.lon ?: 37.618423
+                    val dlat = destination?.lat ?: lat
+                    val dlon = destination?.lon ?: lon
+                    AndroidView(factory = { ctx ->
+                        WebView(ctx).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                            webViewClient = WebViewClient()
+                            loadUrl("https://yandex.ru/maps/?ll=$lon%2C$lat&z=15&rtext=${lat}%2C${lon}~${dlat}%2C${dlon}&rtt=auto")
+                        }
+                    }, modifier = Modifier.fillMaxSize())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun OfflineNavMap(
+    myLocation: GeoPoint?, destination: GeoPoint?, bearing: Float,
+    freeSector: Float, nearestM: Float, offlineFile: Uri?, modifier: Modifier = Modifier
+) {
+    Column(modifier.background(Color(0xFF0D1117))) {
+        Text(
+            if (offlineFile != null) "Оффлайн файл: ${offlineFile.lastPathSegment}"
+            else "Оффлайн схема (без интернета). Загрузите карту кнопкой «Файл».",
+            color = Color(0xFF8B949E), fontSize = 11.sp, modifier = Modifier.padding(4.dp)
+        )
+        Canvas(modifier = Modifier.fillMaxSize().padding(8.dp)) {
+            val w = size.width; val h = size.height; val cx = w / 2f; val cy = h * 0.65f
+            val grid = Color(0xFF21262D)
+            for (i in 0..8) {
+                drawLine(grid, Offset(w * i / 8f, 0f), Offset(w * i / 8f, h), 1f)
+                drawLine(grid, Offset(0f, h * i / 8f), Offset(w, h * i / 8f), 1f)
+            }
+            rotate(degrees = freeSector, pivot = Offset(cx, cy)) {
+                val path = Path().apply {
+                    moveTo(cx, cy); lineTo(cx - w * 0.12f, cy - h * 0.45f); lineTo(cx + w * 0.12f, cy - h * 0.45f); close()
+                }
+                drawPath(path, Color(0x5548D597))
+            }
+            if (destination != null && myLocation != null) {
+                val results = FloatArray(3)
+                Location.distanceBetween(myLocation.lat, myLocation.lon, destination.lat, destination.lon, results)
+                val dist = results[0]; val brg = results[1]
+                val rel = ((brg - bearing + 540f) % 360f) - 180f
+                val scale = min(w, h) * 0.35f / max(dist, 50f)
+                val dx = sin(Math.toRadians(rel.toDouble())).toFloat() * dist * scale
+                val dy = -cos(Math.toRadians(rel.toDouble())).toFloat() * dist * scale
+                drawCircle(Color(0xFFFF7B72), 10f, Offset(cx + dx, cy + dy))
+                drawLine(Color(0x88FF7B72), Offset(cx, cy), Offset(cx + dx, cy + dy), 2f)
+            }
+            val arrow = Path().apply {
+                moveTo(cx, cy - 28f); lineTo(cx - 12f, cy + 14f); lineTo(cx, cy + 4f); lineTo(cx + 12f, cy + 14f); close()
+            }
+            drawPath(arrow, Color(0xFF58A6FF))
+            drawCircle(Color(0xFF58A6FF), 6f, Offset(cx, cy))
+            if (nearestM > 0) {
+                val r = (nearestM / 8f).coerceIn(0.05f, 0.4f) * min(w, h)
+                drawCircle(Color(0x66FFAA33), r, Offset(cx, cy), style = Stroke(3f))
             }
         }
     }
@@ -390,51 +450,61 @@ fun CommandLogPanel(commands: List<DroneVisionPipeline.NavigationCommand>, turnH
 fun DetectionOverlay(
     detections: List<DroneVisionPipeline.Detection>,
     targetX: Float, targetY: Float, stopSignal: Boolean,
+    nnPoint: Pair<Float, Float>,
     autoRotateAngle: Float, showCompass: Boolean, modifier: Modifier = Modifier
 ) {
     Canvas(modifier = modifier) {
         val w = size.width; val h = size.height
-        val paint = android.graphics.Paint().apply { textSize = 28f; isAntiAlias = true }
+        val textPaint = android.graphics.Paint().apply { textSize = 30f; isAntiAlias = true; isFakeBoldText = true }
         for (d in detections) {
-            val color = when (d.type) { "motion" -> Color(0xFFFF66FF); "obstacle" -> Color(0xFFFFAA33); else -> Color.White }
+            val color = when (d.type) {
+                "person" -> Color(0xFF4FC3F7)
+                "car" -> Color(0xFFFF7043)
+                "motion" -> Color(0xFFE040FB)
+                else -> Color(0xFFFFCA28)
+            }
             val left = d.rect.left.coerceIn(0f, w)
             val top = d.rect.top.coerceIn(0f, h)
             val right = d.rect.right.coerceIn(0f, w)
             val bottom = d.rect.bottom.coerceIn(0f, h)
-            if (right - left < 4 || bottom - top < 4) continue
-            drawRect(color.copy(alpha = 0.22f), Offset(left, top), Size(right - left, bottom - top))
-            drawRect(color, Offset(left, top), Size(right - left, bottom - top), style = Stroke(3.5f))
-            val cLen = minOf(18f, (right - left) / 3f, (bottom - top) / 3f)
-            drawLine(color, Offset(left, top), Offset(left + cLen, top), 4f)
-            drawLine(color, Offset(left, top), Offset(left, top + cLen), 4f)
-            drawLine(color, Offset(right, top), Offset(right - cLen, top), 4f)
-            drawLine(color, Offset(right, top), Offset(right, top + cLen), 4f)
-            drawLine(color, Offset(left, bottom), Offset(left + cLen, bottom), 4f)
-            drawLine(color, Offset(left, bottom), Offset(left, bottom - cLen), 4f)
-            drawLine(color, Offset(right, bottom), Offset(right - cLen, bottom), 4f)
-            drawLine(color, Offset(right, bottom), Offset(right, bottom - cLen), 4f)
-            if (d.distanceM > 0) {
-                val label = String.format("%.1f м", d.distanceM)
-                paint.color = android.graphics.Color.BLACK
-                drawContext.canvas.nativeCanvas.drawText(label, left + 4f, (top - 6f).coerceAtLeast(24f), paint)
-                paint.color = android.graphics.Color.YELLOW
-                drawContext.canvas.nativeCanvas.drawText(label, left + 3f, (top - 7f).coerceAtLeast(23f), paint)
+            if (right - left < 6 || bottom - top < 6) continue
+            drawRect(color.copy(alpha = 0.25f), Offset(left, top), Size(right - left, bottom - top))
+            drawRect(color, Offset(left, top), Size(right - left, bottom - top), style = Stroke(4.5f))
+            val cLen = minOf(22f, (right - left) / 2.5f, (bottom - top) / 2.5f)
+            val sw = 5f
+            drawLine(color, Offset(left, top), Offset(left + cLen, top), sw)
+            drawLine(color, Offset(left, top), Offset(left, top + cLen), sw)
+            drawLine(color, Offset(right, top), Offset(right - cLen, top), sw)
+            drawLine(color, Offset(right, top), Offset(right, top + cLen), sw)
+            drawLine(color, Offset(left, bottom), Offset(left + cLen, bottom), sw)
+            drawLine(color, Offset(left, bottom), Offset(left, bottom - cLen), sw)
+            drawLine(color, Offset(right, bottom), Offset(right - cLen, bottom), sw)
+            drawLine(color, Offset(right, bottom), Offset(right, bottom - cLen), sw)
+            val label = buildString {
+                append(d.type)
+                if (d.distanceM > 0) append(" ").append(String.format("%.1f", d.distanceM)).append("м")
             }
+            val ty = (top - 8f).coerceAtLeast(28f)
+            textPaint.color = android.graphics.Color.BLACK
+            drawContext.canvas.nativeCanvas.drawText(label, left + 3f, ty, textPaint)
+            textPaint.color = android.graphics.Color.WHITE
+            drawContext.canvas.nativeCanvas.drawText(label, left + 2f, ty - 1f, textPaint)
         }
-        val tx = targetX * w; val ty = targetY * h
-        drawCircle(Color(0xFF00FF88), 8f, Offset(tx, ty))
-        drawLine(Color(0xFF00FF88), Offset(w / 2f, h * 0.92f), Offset(tx, ty), 2.5f)
+        val nx = nnPoint.first * w; val ny = nnPoint.second * h
+        drawCircle(Color(0xFF69F0AE), 10f, Offset(nx, ny))
+        drawLine(Color(0xFF69F0AE), Offset(w / 2f, h * 0.9f), Offset(nx, ny), 3f)
+        drawCircle(Color(0xFF00E676), 7f, Offset(targetX * w, targetY * h))
         if (showCompass) {
-            val cx = w / 2f; val cy = h * 0.8f
+            val cx = w / 2f; val cy = h * 0.82f
             rotate(degrees = autoRotateAngle, pivot = Offset(cx, cy)) {
                 val path = Path().apply {
-                    moveTo(cx, cy - 36f); lineTo(cx - 14f, cy + 18f); lineTo(cx, cy + 6f); lineTo(cx + 14f, cy + 18f); close()
+                    moveTo(cx, cy - 34f); lineTo(cx - 13f, cy + 16f); lineTo(cx, cy + 5f); lineTo(cx + 13f, cy + 16f); close()
                 }
-                drawPath(path, Color(0xFFFFD700))
+                drawPath(path, Color(0xFFFFD740))
             }
-            drawCircle(Color(0x55FFD700), 42f, Offset(cx, cy), style = Stroke(1.5f))
+            drawCircle(Color(0x55FFD740), 40f, Offset(cx, cy), style = Stroke(1.5f))
         }
-        if (stopSignal) drawRect(Color(0x33FF0000), Offset.Zero, Size(w, h))
+        if (stopSignal) drawRect(Color(0x44FF0000), Offset.Zero, Size(w, h))
     }
 }
 
