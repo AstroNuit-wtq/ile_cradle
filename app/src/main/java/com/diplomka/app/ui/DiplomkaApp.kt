@@ -658,14 +658,16 @@ private fun buildCameraSelector(lensLabel: String): CameraSelector {
                 .addCameraFilter { cameras ->
                     val wide = cameras.filter { cam ->
                         val f = try {
-                            Camera2CameraInfo.from(cam.cameraInfo).getCameraCharacteristic(
+                            Camera2CameraInfo.from(cam).getCameraCharacteristic(
                                 CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
                             )
                         } catch (_: Exception) { null }
                         val minF = f?.minOrNull() ?: 99f
                         minF < 3.2f
                     }
-                    if (wide.isNotEmpty()) wide else cameras.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                    if (wide.isNotEmpty()) wide else cameras.filter {
+                        it.lensFacing == CameraSelector.LENS_FACING_BACK
+                    }
                 }.build()
         }
         lensLabel.contains("Макро", ignoreCase = true) || lensLabel.contains("теле", ignoreCase = true) -> {
@@ -674,14 +676,16 @@ private fun buildCameraSelector(lensLabel: String): CameraSelector {
                 .addCameraFilter { cameras ->
                     val macro = cameras.filter { cam ->
                         val f = try {
-                            Camera2CameraInfo.from(cam.cameraInfo).getCameraCharacteristic(
+                            Camera2CameraInfo.from(cam).getCameraCharacteristic(
                                 CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
                             )
                         } catch (_: Exception) { null }
                         val minF = f?.minOrNull() ?: 0f
                         minF > 5.0f
                     }
-                    if (macro.isNotEmpty()) macro else cameras.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                    if (macro.isNotEmpty()) macro else cameras.filter {
+                        it.lensFacing == CameraSelector.LENS_FACING_BACK
+                    }
                 }.build()
         }
         lensLabel.contains("USB", ignoreCase = true) || lensLabel.contains("внеш", ignoreCase = true) -> {
@@ -691,7 +695,9 @@ private fun buildCameraSelector(lensLabel: String): CameraSelector {
                         it.lensFacing != CameraSelector.LENS_FACING_FRONT &&
                             it.lensFacing != CameraSelector.LENS_FACING_BACK
                     }
-                    if (ext.isNotEmpty()) ext else cameras.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                    if (ext.isNotEmpty()) ext else cameras.filter {
+                        it.lensFacing == CameraSelector.LENS_FACING_BACK
+                    }
                 }.build()
         }
         else -> CameraSelector.DEFAULT_BACK_CAMERA
