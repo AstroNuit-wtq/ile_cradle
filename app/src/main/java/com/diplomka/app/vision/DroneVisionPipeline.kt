@@ -6,22 +6,22 @@ import kotlin.math.*
 
 /**
  * Unified vision pipeline based on the original diploma Python scripts:
- * - detect_objects.py / hog_detection.py  → people, vehicles, buildings, motion
- * - yellow_road.py / width_road.py        → road center / nearest-neighbor target
- * - time_and_distance.py                  → optical-flow style distance & speed
+ * - detect_objects.py / hog_detection.py  -> people, vehicles, buildings, motion
+ * - yellow_road.py / width_road.py        -> road center / nearest-neighbor target
+ * - time_and_distance.py                  -> optical-flow style distance & speed
  * - simple weather estimation from image statistics
  */
 class DroneVisionPipeline {
 
     data class Detection(
-        val type: String,          // "person", "vehicle", "building", "motion"
+        val type: String,
         val rect: RectF,
         val confidence: Float
     )
 
     data class NavigationCommand(
         val text: String,
-        val severity: Severity,    // INFO, WARN, STOP, NAV
+        val severity: Severity,
         val timestamp: Long = System.currentTimeMillis()
     ) {
         enum class Severity { INFO, WARN, STOP, NAV }
@@ -30,7 +30,7 @@ class DroneVisionPipeline {
     data class FrameResult(
         val detections: List<Detection>,
         val stopSignal: Boolean,
-        val targetX: Float,        // normalized 0..1 (nearest-neighbor road point)
+        val targetX: Float,
         val targetY: Float,
         val estimatedSpeedMps: Float,
         val totalDistanceM: Float,
@@ -52,7 +52,6 @@ class DroneVisionPipeline {
         val w = bitmap.width
         val h = bitmap.height
 
-        // Downscale for speed
         val scale = 320f / max(w, h)
         val sw = (w * scale).toInt().coerceAtLeast(80)
         val sh = (h * scale).toInt().coerceAtLeast(60)
@@ -72,13 +71,11 @@ class DroneVisionPipeline {
         val detections = mutableListOf<Detection>()
         val commands = mutableListOf<NavigationCommand>()
 
-        // --- 1. Motion / activity detection (from detect_objects.py) ---
         val motionRects = detectMotion(luma, sw, sh)
         for (r in motionRects) {
             detections.add(Detection("motion", r, 0.7f))
         }
 
-        // --- 2. People / vehicles / buildings heuristics (from hog_detection.py) ---
         val people = detectPeopleHeuristic(luma, pixels, sw, sh)
         detections.addAll(people)
         val vehicles = detectVehiclesHeuristic(luma, pixels, sw, sh)
@@ -90,21 +87,17 @@ class DroneVisionPipeline {
         val hasVehicle = vehicles.isNotEmpty()
         val stopSignal = hasPerson || hasVehicle || motionRects.size > 3
 
-        // --- 3. Road center / nearest-neighbor target (yellow_road / width_road) ---
         val (tx, ty, roadWidth) = estimateRoadTarget(luma, sw, sh)
 
-        // --- 4. Simple optical-flow displacement → speed & distance ---
         val displacement = estimateDisplacement(luma, sw, sh)
         val fpsApprox = 15f
-        val scaleFactor = 0.06f          // calibrated similarly to time_and_distance.py
+        val scaleFactor = 0.06f
         val rawSpeed = (displacement * scaleFactor * fpsApprox).coerceIn(0f, 15f)
         smoothedSpeed = 0.3f * rawSpeed + 0.7f * smoothedSpeed
         totalDistance += smoothedSpeed / fpsApprox
 
-        // --- 5. Weather from external signs ---
         val weather = estimateWeather(pixels, sw, sh)
 
-        // --- Commands (real, not mock) ---
         if (stopSignal) {
             val reason = when {
                 hasPerson -> "ЧЕЛОВЕК обнаружен — СТОП"
@@ -127,7 +120,7 @@ class DroneVisionPipeline {
             if (roadWidth > 0) {
                 commands.add(
                     NavigationCommand(
-                        "Ширина дороги ≈ ${\"%.1f\".format(roadWidth)} м",
+                        "Ширина дороги ≈ " + String.format("%.1f", roadWidth) + " м",
                         NavigationCommand.Severity.INFO
                     )
                 )
@@ -136,7 +129,7 @@ class DroneVisionPipeline {
 
         commands.add(
             NavigationCommand(
-                "Скорость ≈ ${\"%.1f\".format(smoothedSpeed)} м/с  |  Дистанция ${\"%.1f\".format(totalDistance)} м",
+                "Скорость ≈ " + String.format("%.1f", smoothedSpeed) + " м/с  |  Дистанция " + String.format("%.1f", totalDistance) + " м",
                 NavigationCommand.Severity.INFO
             )
         )
@@ -150,7 +143,6 @@ class DroneVisionPipeline {
             )
         )
 
-        // Keep history
         for (c in commands) {
             commandHistory.addFirst(c)
             if (commandHistory.size > 30) commandHistory.removeLast()
@@ -160,7 +152,6 @@ class DroneVisionPipeline {
         prevWidth = sw
         prevHeight = sh
 
-        // Map rects back to original image coordinates
         val mapped = detections.map {
             Detection(
                 it.type,
