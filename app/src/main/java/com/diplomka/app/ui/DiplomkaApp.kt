@@ -1,13 +1,17 @@
 package com.diplomka.app.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.location.Location
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -17,6 +21,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -104,6 +110,10 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     var autoRotate by remember { mutableStateOf(true) }
     var strictStop by remember { mutableStateOf(true) }
     var forceStop by remember { mutableStateOf(false) }
+    var torchOn by remember { mutableStateOf(false) }
+    var cameraLensIndex by remember { mutableStateOf(0) }
+    var availableLenses by remember { mutableStateOf(listOf("Основная", "Ширик", "Макро/теле", "USB/внешняя")) }
+    var cameraControlRef by remember { mutableStateOf<CameraControl?>(null) }
     var sourceMode by remember { mutableStateOf(SourceMode.CAMERA) }
     var showMap by remember { mutableStateOf(false) }
     var mapOffline by remember { mutableStateOf(true) }
@@ -121,6 +131,32 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
 
     LaunchedEffect(strictStop) { pipeline.strictStopEnabled = strictStop }
     LaunchedEffect(forceStop) { pipeline.forceStop = forceStop }
+    LaunchedEffect(torchOn, cameraControlRef) {
+        try { cameraControlRef?.enableTorch(torchOn) } catch (_: Exception) {}
+    }
+    LaunchedEffect(Unit) {
+        try {
+            val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val labels = mutableListOf<String>()
+            for (id in cm.cameraIdList) {
+                val chars = cm.getCameraCharacteristics(id)
+                val facing = chars.get(CameraCharacteristics.LENS_FACING)
+                if (facing == CameraCharacteristics.LENS_FACING_FRONT) continue
+                val focals = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                val minF = focals?.minOrNull() ?: 4f
+                val label = when {
+                    minF < 2.8f -> "Ширик"
+                    minF > 5.5f -> "Макро/теле"
+                    else -> "Основная"
+                }
+                if (label !in labels) labels.add(label)
+            }
+            if ("Ширик" !in labels) labels.add("Ширик")
+            if ("Макро/теле" !in labels) labels.add("Макро/теле")
+            if ("USB/внешняя" !in labels) labels.add("USB/внешняя")
+            if (labels.isNotEmpty()) availableLenses = labels
+        } catch (e: Exception) { Log.e("Diplomka", "lenses", e) }
+    }
 
     DisposableEffect(Unit) {
         val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -216,13 +252,22 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
         Box(Modifier.fillMaxWidth().fillMaxHeight(if (showLog) 0.56f else 1f).border(3.dp, borderColor)) {
             when {
                 sourceMode == SourceMode.CAMERA && hasCamera -> {
-                    StableCameraPreview(lifecycleOwner, isRunning, analysisExecutor, cameraBound) { bitmap ->
-                        if (!isRunning) return@StableCameraPreview
-                        val now = System.currentTimeMillis()
-                        if (now - lastUiUpdate.get() < 200) return@StableCameraPreview
-                        lastUiUpdate.set(now)
-                        result = pipeline.process(bitmap)
-                    }
+                    StableCameraPreview(
+                        lifecycleOwner = lifecycleOwner,
+                        isRunning = isRunning,
+                        analysisExecutor = analysisExecutor,
+                        cameraBound = cameraBound,
+                        lensLabel = availableLenses.getOrElse(cameraLensIndex) { "Основная" },
+                        torchOn = torchOn,
+                        onCameraControl = { cameraControlRef = it },
+                        onFrame = { bitmap ->
+                            if (!isRunning) return@StableCameraPreview
+                            val now = System.currentTimeMillis()
+                            if (now - lastUiUpdate.get() < 200) return@StableCameraPreview
+                            lastUiUpdate.set(now)
+                            result = pipeline.process(bitmap)
+                        }
+                    )
                 }
                 sourceMode == SourceMode.VIDEO -> {
                     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
@@ -257,6 +302,9 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                         Text("До объекта ≈ " + String.format("%.1f", r.nearestDistanceM) + " м | " + r.bypassHint, color = Color(0xFFFFD700), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     }
                     Text("NN сектор: " + String.format("%+.0f", r.freeSectorDeg) + "°", color = Color(0xFF79C0FF), fontSize = 10.sp)
+                    if (r.sceneBrightness < 55f) {
+                        Text("Темно (" + String.format("%.0f", r.sceneBrightness) + ") — вспышка", color = Color(0xFFFF9800), fontSize = 10.sp)
+                    }
                 }
                 Text("Источник: " + (if (sourceMode == SourceMode.CAMERA) "камера" else "видео") + if (strictStop) " | STOP авто" else " | STOP выкл", color = Color(0xFF8B949E), fontSize = 10.sp)
             }
@@ -274,8 +322,36 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                         else { sourceMode = SourceMode.CAMERA; videoPlaying = false; cameraBound.set(false); pipeline.reset() }
                     }
                     SmallBtn("Карта", Icons.Default.Map) { showMap = true }
+                    FilledTonalButton(
+                        onClick = {
+                            torchOn = !torchOn
+                            try { cameraControlRef?.enableTorch(torchOn) } catch (_: Exception) {}
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (torchOn) Color(0xFFFFC107) else Color(0xFF21262D))
+                    ) {
+                        Icon(if (torchOn) Icons.Default.FlashOn else Icons.Default.FlashOff, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Вспышка", color = Color.White, fontSize = 11.sp)
+                    }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    SmallBtn(availableLenses.getOrElse(cameraLensIndex) { "Камера" }, Icons.Default.Cameraswitch) {
+                        cameraLensIndex = (cameraLensIndex + 1) % max(availableLenses.size, 1)
+                        cameraBound.set(false)
+                        torchOn = false
+                    }
+                    SmallBtn("Поворот", Icons.Default.ScreenRotation) {
+                        val act = context as? Activity
+                        act?.let {
+                            val cur = it.requestedOrientation
+                            it.requestedOrientation = if (
+                                cur == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+                                cur == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            ) ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        }
+                    }
                     SmallBtn("Цель 300м", Icons.Default.Flag) {
                         val base = myLocation ?: GeoPoint(55.751244, 37.618423)
                         if (myLocation == null) myLocation = base
@@ -460,6 +536,7 @@ fun DetectionOverlay(
             val color = when (d.type) {
                 "person" -> Color(0xFF4FC3F7)
                 "car" -> Color(0xFFFF7043)
+                "building" -> Color(0xFF81C784)
                 "motion" -> Color(0xFFE040FB)
                 else -> Color(0xFFFFCA28)
             }
@@ -510,8 +587,14 @@ fun DetectionOverlay(
 
 @Composable
 fun StableCameraPreview(
-    lifecycleOwner: LifecycleOwner, isRunning: Boolean,
-    analysisExecutor: java.util.concurrent.Executor, cameraBound: AtomicBoolean, onFrame: (Bitmap) -> Unit
+    lifecycleOwner: LifecycleOwner,
+    isRunning: Boolean,
+    analysisExecutor: java.util.concurrent.Executor,
+    cameraBound: AtomicBoolean,
+    lensLabel: String = "Основная",
+    torchOn: Boolean = false,
+    onCameraControl: (CameraControl?) -> Unit = {},
+    onFrame: (Bitmap) -> Unit
 ) {
     val context = LocalContext.current
     val previewView = remember {
@@ -524,7 +607,7 @@ fun StableCameraPreview(
     val runningState = rememberUpdatedState(isRunning)
     val onFrameState = rememberUpdatedState(onFrame)
     AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, lensLabel) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val executor = ContextCompat.getMainExecutor(context)
         val listener = Runnable {
@@ -550,15 +633,68 @@ fun StableCameraPreview(
                     finally { imageProxy.close() }
                 }
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                val selector = buildCameraSelector(lensLabel)
+                val camera = cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                onCameraControl(camera.cameraControl)
+                try { camera.cameraControl.enableTorch(torchOn) } catch (_: Exception) {}
                 cameraBound.set(true)
             } catch (e: Exception) { Log.e("Diplomka", "bind", e) }
         }
         cameraProviderFuture.addListener(listener, executor)
         onDispose {
             try { cameraProviderFuture.get().unbindAll() } catch (_: Exception) {}
+            onCameraControl(null)
             cameraBound.set(false)
         }
+    }
+}
+
+@OptIn(ExperimentalCamera2Interop::class)
+private fun buildCameraSelector(lensLabel: String): CameraSelector {
+    return when {
+        lensLabel.contains("Ширик", ignoreCase = true) -> {
+            CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+                .addCameraFilter { cameras ->
+                    val wide = cameras.filter { cam ->
+                        val f = try {
+                            Camera2CameraInfo.from(cam.cameraInfo).getCameraCharacteristic(
+                                CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+                            )
+                        } catch (_: Exception) { null }
+                        val minF = f?.minOrNull() ?: 99f
+                        minF < 3.2f
+                    }
+                    if (wide.isNotEmpty()) wide else cameras.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                }.build()
+        }
+        lensLabel.contains("Макро", ignoreCase = true) || lensLabel.contains("теле", ignoreCase = true) -> {
+            CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+                .addCameraFilter { cameras ->
+                    val macro = cameras.filter { cam ->
+                        val f = try {
+                            Camera2CameraInfo.from(cam.cameraInfo).getCameraCharacteristic(
+                                CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+                            )
+                        } catch (_: Exception) { null }
+                        val minF = f?.minOrNull() ?: 0f
+                        minF > 5.0f
+                    }
+                    if (macro.isNotEmpty()) macro else cameras.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                }.build()
+        }
+        lensLabel.contains("USB", ignoreCase = true) || lensLabel.contains("внеш", ignoreCase = true) -> {
+            CameraSelector.Builder()
+                .addCameraFilter { cameras ->
+                    val ext = cameras.filter {
+                        it.lensFacing != CameraSelector.LENS_FACING_FRONT &&
+                            it.lensFacing != CameraSelector.LENS_FACING_BACK
+                    }
+                    if (ext.isNotEmpty()) ext else cameras.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                }.build()
+        }
+        else -> CameraSelector.DEFAULT_BACK_CAMERA
     }
 }
 
