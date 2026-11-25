@@ -4,7 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.RectF
 import kotlin.math.*
 
-/** Tuned for Redmi 9 / Note 13 / Note 13 Pro. Low-light adaptive thresholds. */
+/** Tuned for Redmi 9 / Note 13 / Note 13 Pro. Low-light adaptive + proximity STOP. */
 class DroneVisionPipeline {
 
     data class Detection(
@@ -40,7 +40,7 @@ class DroneVisionPipeline {
         val sceneBrightness: Float
     )
 
-    var strictStopEnabled: Boolean = false
+    var strictStopEnabled: Boolean = true
     @Volatile var forceStop: Boolean = false
 
     private var prevLuma: IntArray? = null
@@ -50,6 +50,7 @@ class DroneVisionPipeline {
     private val commandHistory = ArrayDeque<NavigationCommand>(24)
     private var motionHits = 0
     private var stopActive = false
+    private var stopHoldFrames = 0
     private var lastCommandFrame = -999
     private var lastWeather = "неизвестно"
     private var lastTx = 0.5f
@@ -87,21 +88,32 @@ class DroneVisionPipeline {
         val brightness = (sumL / luma.size).toFloat()
         lastBrightness = 0.7f * lastBrightness + 0.3f * brightness
         val enhanced = if (lastBrightness < 70f) enhanceLowLight(luma, sw, sh) else luma
+
         val detections = mutableListOf<Detection>()
         val commands = mutableListOf<NavigationCommand>()
-        val obstacles = detectAndClassify(enhanced, sw, sh, lastBrightness)
-        detections.addAll(obstacles)
+        detections.addAll(detectAndClassify(enhanced, sw, sh, lastBrightness))
+
         val motionRects = detectStrongMotion(enhanced, sw, sh, lastBrightness)
         if (motionRects.isNotEmpty()) {
             motionHits = (motionHits + 1).coerceAtMost(14)
             for (r in motionRects) {
                 val cls = classifyBox(r, sw, sh)
-                detections.add(Detection(if (cls == "obstacle") "motion" else cls, r, 0.8f, estimateDistance(r, sh, cls), sideOf(r, sw)))
+                detections.add(
+                    Detection(
+                        if (cls == "obstacle") "motion" else cls,
+                        r, 0.8f, estimateDistance(r, sh, cls), sideOf(r, sw)
+                    )
+                )
             }
-        } else motionHits = (motionHits - 2).coerceAtLeast(0)
+        } else {
+            motionHits = (motionHits - 2).coerceAtLeast(0)
+        }
+
         val merged = mergeOverlapping(detections).sortedBy { it.distanceM.takeIf { d -> d > 0 } ?: 99f }
         val nearest = merged.filter { it.distanceM > 0 }.minByOrNull { it.distanceM }
         val nearestDist = nearest?.distanceM ?: -1f
+        val proximityScore = computeProximityScore(merged, sw, sh)
+
         val (freeDeg, nextPt) = nearestNeighborFreePath(merged, sw, sh)
         lastFreeSector = 0.6f * lastFreeSector + 0.4f * freeDeg
         val bypass = when {
@@ -111,42 +123,114 @@ class DroneVisionPipeline {
             merged.isEmpty() -> "путь свободен"
             else -> "держите курс"
         }
-        val closeDanger = nearestDist in 0.15f..1.1f && (nearest?.type == "person" || nearest?.type == "car" || nearest?.type == "motion")
-        val wantStop = forceStop || (strictStopEnabled && (motionHits >= 7 || closeDanger || nearestDist in 0.15f..0.7f))
-        if (wantStop) stopActive = true
-        else if (!forceStop && motionHits <= 1 && (nearestDist < 0 || nearestDist > 1.4f)) stopActive = false
+
+        val closeByDistance = nearestDist > 0f && nearestDist <= 1.8f
+        val closeBySize = proximityScore >= 0.55f
+        val motionDanger = motionHits >= 5
+        val wantStop = forceStop || (strictStopEnabled && (closeByDistance || closeBySize || motionDanger))
+
+        if (wantStop) {
+            stopActive = true
+            stopHoldFrames = 12
+        } else if (stopHoldFrames > 0) {
+            stopHoldFrames--
+        } else if (!forceStop) {
+            stopActive = false
+        }
         val stopSignal = stopActive || forceStop
+
         val (txRaw, tyRaw, roadWidth) = estimateRoadTarget(enhanced, sw, sh)
         val biasX = (freeDeg / 90f) * 0.22f
         lastTx = (0.55f * lastTx + 0.45f * (txRaw + biasX).coerceIn(0.12f, 0.88f))
         lastTy = 0.7f * lastTy + 0.3f * tyRaw
         lastRoadWidth = 0.85f * lastRoadWidth + 0.15f * roadWidth
+
         val displacement = estimateDisplacement(enhanced, sw, sh)
         val rawSpeed = (displacement * 0.04f * 10f).coerceIn(0f, 10f)
         smoothedSpeed = 0.25f * rawSpeed + 0.75f * smoothedSpeed
         if (!stopSignal) totalDistance += smoothedSpeed / 10f
+
         if (frameIndex % 18 == 0) lastWeather = estimateWeather(pixels, sw, sh, lastBrightness)
+
         if (frameIndex - lastCommandFrame >= 7) {
             lastCommandFrame = frameIndex
-            if (stopSignal) commands.add(NavigationCommand(if (forceStop) "СТОП (кнопка)" else "СТОП — препятствие", NavigationCommand.Severity.STOP))
-            else {
-                val dir = when { lastTx < 0.36f -> "влево"; lastTx > 0.64f -> "вправо"; else -> "прямо" }
+            if (stopSignal) {
+                commands.add(
+                    NavigationCommand(
+                        if (forceStop) "СТОП (кнопка)" else "СТОП — препятствие близко",
+                        NavigationCommand.Severity.STOP
+                    )
+                )
+            } else {
+                val dir = when {
+                    lastTx < 0.36f -> "влево"
+                    lastTx > 0.64f -> "вправо"
+                    else -> "прямо"
+                }
                 commands.add(NavigationCommand("NN курс: $dir (сектор ${freeDeg.toInt()}°)", NavigationCommand.Severity.NAV))
             }
             if (nearestDist > 0 && nearest != null) {
-                commands.add(NavigationCommand("${nearest.type} ≈ " + String.format("%.1f", nearestDist) + " м (" + nearest.side + ")", NavigationCommand.Severity.WARN))
+                commands.add(
+                    NavigationCommand(
+                        "${nearest.type} ≈ " + String.format("%.1f", nearestDist) + " м (" + nearest.side + ")",
+                        NavigationCommand.Severity.WARN
+                    )
+                )
             }
-            if (lastBrightness < 55f) commands.add(NavigationCommand("Темно — включите вспышку", NavigationCommand.Severity.WARN))
+            if (lastBrightness < 55f) {
+                commands.add(NavigationCommand("Темно — включите вспышку", NavigationCommand.Severity.WARN))
+            }
             commands.add(NavigationCommand("Обход: $bypass", NavigationCommand.Severity.NAV))
-            if (merged.isNotEmpty()) commands.add(NavigationCommand("Объектов: ${merged.size}", NavigationCommand.Severity.INFO))
-            commands.add(NavigationCommand("Скорость " + String.format("%.1f", smoothedSpeed) + " м/с | Путь " + String.format("%.1f", totalDistance) + " м", NavigationCommand.Severity.INFO))
-            for (c in commands) { commandHistory.addFirst(c); if (commandHistory.size > 20) commandHistory.removeLast() }
+            if (merged.isNotEmpty()) {
+                commands.add(NavigationCommand("Объектов: ${merged.size}", NavigationCommand.Severity.INFO))
+            }
+            commands.add(
+                NavigationCommand(
+                    "Скорость " + String.format("%.1f", smoothedSpeed) +
+                        " м/с | Путь " + String.format("%.1f", totalDistance) + " м",
+                    NavigationCommand.Severity.INFO
+                )
+            )
+            for (c in commands) {
+                commandHistory.addFirst(c)
+                if (commandHistory.size > 20) commandHistory.removeLast()
+            }
         }
+
         prevLuma = enhanced
         val mapped = merged.map {
-            Detection(it.type, RectF(it.rect.left / scale, it.rect.top / scale, it.rect.right / scale, it.rect.bottom / scale), it.confidence, it.distanceM, it.side)
+            Detection(
+                it.type,
+                RectF(it.rect.left / scale, it.rect.top / scale, it.rect.right / scale, it.rect.bottom / scale),
+                it.confidence, it.distanceM, it.side
+            )
         }
-        return FrameResult(mapped, stopSignal, lastTx, lastTy, smoothedSpeed, totalDistance.toFloat(), lastWeather, lastRoadWidth, commandHistory.toList(), nearestDist, bypass, lastFreeSector, Pair(nextPt.first, nextPt.second), lastBrightness)
+        return FrameResult(
+            mapped, stopSignal, lastTx, lastTy, smoothedSpeed, totalDistance.toFloat(),
+            lastWeather, lastRoadWidth, commandHistory.toList(), nearestDist, bypass,
+            lastFreeSector, Pair(nextPt.first, nextPt.second), lastBrightness
+        )
+    }
+
+    private fun computeProximityScore(dets: List<Detection>, w: Int, h: Int): Float {
+        if (dets.isEmpty()) return 0f
+        val lowerTop = h * 0.35f
+        var best = 0f
+        for (d in dets) {
+            val rh = d.rect.height() / h
+            val rw = d.rect.width() / w
+            val cy = d.rect.centerY()
+            if (cy < lowerTop) continue
+            val area = (rh * rw).coerceIn(0f, 1f)
+            val distBoost = when {
+                d.distanceM in 0.1f..1.2f -> 0.35f
+                d.distanceM in 1.2f..2.0f -> 0.15f
+                else -> 0f
+            }
+            val score = (area * 1.6f + rh * 0.9f + distBoost).coerceIn(0f, 1f)
+            if (score > best) best = score
+        }
+        return best
     }
 
     private fun enhanceLowLight(luma: IntArray, w: Int, h: Int): IntArray {
@@ -204,8 +288,12 @@ class DroneVisionPipeline {
                 val bw = maxX - minX; val bh = maxY - minY
                 if (area >= minArea && bw > 8 && bh > 8) {
                     val padX = max(4, bw / 10); val padY = max(4, bh / 12)
-                    val rect = RectF((minX - padX).toFloat().coerceAtLeast(0f), (minY - padY).toFloat().coerceAtLeast(0f),
-                        (maxX + padX).toFloat().coerceAtMost(w - 1f), (maxY + padY).toFloat().coerceAtMost(h - 1f))
+                    val rect = RectF(
+                        (minX - padX).toFloat().coerceAtLeast(0f),
+                        (minY - padY).toFloat().coerceAtLeast(0f),
+                        (maxX + padX).toFloat().coerceAtMost(w - 1f),
+                        (maxY + padY).toFloat().coerceAtMost(h - 1f)
+                    )
                     val cls = classifyBox(rect, w, h)
                     val conf = when (cls) { "person" -> 0.8f; "car" -> 0.78f; "building" -> 0.72f; else -> 0.65f }
                     results.add(Detection(cls, rect, conf, estimateDistance(rect, h, cls), sideOf(rect, w)))
@@ -365,6 +453,7 @@ class DroneVisionPipeline {
 
     fun reset() {
         prevLuma = null; frameIndex = 0; totalDistance = 0.0; smoothedSpeed = 0f
-        commandHistory.clear(); motionHits = 0; stopActive = false; forceStop = false; lastCommandFrame = -999
+        commandHistory.clear(); motionHits = 0; stopActive = false; stopHoldFrames = 0
+        forceStop = false; lastCommandFrame = -999
     }
 }
