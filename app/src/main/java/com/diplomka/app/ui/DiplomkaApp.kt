@@ -1,4 +1,4 @@
 package com.diplomka.app.ui
 
-// FILE RESTORED - see Diplomka_sources.zip for full content with physical camera support
-// Placeholder to avoid broken build - full file will be pushed next
+// Restored minimal stub - REPLACE this file from Diplomka_sources.zip
+// Full file with physical camera switching is in the zip delivery.
