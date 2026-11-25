@@ -46,6 +46,7 @@ private:
     bool chooseBackCamera();
     bool startRepeating();
     void setError(const char* msg);
+    void stopUnlocked();
 
     ACameraManager* manager_ = nullptr;
     ACameraDevice* device_ = nullptr;
