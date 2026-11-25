@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - 'app/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle.properties'
       - 'Diplomka_Native_CPP_Source.zip'
       - '.github/workflows/build-astro-cpp.yml'
 
@@ -52,26 +56,29 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # The source archive is the only project input besides this workflow.
-      # Everything is extracted under RUNNER_TEMP, never into the checked-out repo.
-      - name: Extract native source archive
+      - name: Resolve source directory
         id: source
         shell: bash
         run: |
           set -euo pipefail
           ARCHIVE="$GITHUB_WORKSPACE/Diplomka_Native_CPP_Source.zip"
-          test -f "$ARCHIVE" || { echo 'Missing Diplomka_Native_CPP_Source.zip in repository root'; exit 1; }
-          SRC_PARENT="$RUNNER_TEMP/diplomka-src"
-          mkdir -p "$SRC_PARENT"
-          unzip -q "$ARCHIVE" -d "$SRC_PARENT"
-          if [ -f "$SRC_PARENT/settings.gradle" ]; then
-            SRC_DIR="$SRC_PARENT"
+          if [ -f "$ARCHIVE" ]; then
+            SRC_PARENT="$RUNNER_TEMP/diplomka-src"
+            mkdir -p "$SRC_PARENT"
+            unzip -q "$ARCHIVE" -d "$SRC_PARENT"
+            if [ -f "$SRC_PARENT/settings.gradle" ]; then
+              SRC_DIR="$SRC_PARENT"
+            else
+              SRC_DIR="$(find "$SRC_PARENT" -mindepth 2 -maxdepth 4 -name settings.gradle -print -quit | xargs -r dirname)"
+            fi
           else
-            SRC_DIR="$(find "$SRC_PARENT" -mindepth 2 -maxdepth 4 -name settings.gradle -print -quit | xargs -r dirname)"
+            # Build from checked-out native tree (no Kotlin/Java app sources)
+            SRC_DIR="$GITHUB_WORKSPACE"
           fi
           test -n "$SRC_DIR" && test -f "$SRC_DIR/app/src/main/cpp/CMakeLists.txt"
+          test -f "$SRC_DIR/settings.gradle"
           echo "src_dir=$SRC_DIR" >> "$GITHUB_OUTPUT"
-          echo "Source extracted to runner temp directory: $SRC_DIR"
+          echo "Using source: $SRC_DIR"
 
       - name: Download NCNN Android CPU runtime
         id: ncnn
@@ -111,7 +118,7 @@ jobs:
           test "$(wc -c < "$ASSETS/yolov8n_pose.ncnn.bin")" -gt 100000
           sha256sum "$ASSETS"/*
 
-      - name: Build APK (all generated files stay in runner temp)
+      - name: Build APK (artifacts only; no commit)
         shell: bash
         env:
           SRC_DIR: ${{ steps.source.outputs.src_dir }}
