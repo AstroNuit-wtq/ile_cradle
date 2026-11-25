@@ -26,14 +26,22 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.Image
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -41,14 +49,19 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -92,6 +105,7 @@ fun DiplomkaApp() {
 }
 
 data class GeoPoint(val lat: Double, val lon: Double)
+data class CameraOption(val id: String, val label: String, val facing: Int)
 enum class SourceMode { CAMERA, VIDEO }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -111,8 +125,9 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     var strictStop by remember { mutableStateOf(true) }
     var forceStop by remember { mutableStateOf(false) }
     var torchOn by remember { mutableStateOf(false) }
-    var cameraLensIndex by remember { mutableStateOf(0) }
-    var availableLenses by remember { mutableStateOf(listOf("Основная", "Ширик", "Макро/теле", "USB/внешняя")) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var cameraOptions by remember { mutableStateOf<List<CameraOption>>(emptyList()) }
+    var cameraIndex by remember { mutableStateOf(0) }
     var cameraControlRef by remember { mutableStateOf<CameraControl?>(null) }
     var sourceMode by remember { mutableStateOf(SourceMode.CAMERA) }
     var showMap by remember { mutableStateOf(false) }
@@ -121,6 +136,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     var videoPlaying by remember { mutableStateOf(false) }
     var videoFrame by remember { mutableStateOf<Bitmap?>(null) }
     var offlineMapUri by remember { mutableStateOf<Uri?>(null) }
+    var screenWaypoint by remember { mutableStateOf<Offset?>(null) }
 
     var myLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var myBearing by remember { mutableStateOf(0f) }
@@ -134,28 +150,32 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     LaunchedEffect(torchOn, cameraControlRef) {
         try { cameraControlRef?.enableTorch(torchOn) } catch (_: Exception) {}
     }
+
     LaunchedEffect(Unit) {
         try {
             val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val labels = mutableListOf<String>()
+            val opts = mutableListOf<CameraOption>()
             for (id in cm.cameraIdList) {
                 val chars = cm.getCameraCharacteristics(id)
-                val facing = chars.get(CameraCharacteristics.LENS_FACING)
+                val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
                 if (facing == CameraCharacteristics.LENS_FACING_FRONT) continue
                 val focals = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                 val minF = focals?.minOrNull() ?: 4f
                 val label = when {
-                    minF < 2.8f -> "Ширик"
-                    minF > 5.5f -> "Макро/теле"
-                    else -> "Основная"
+                    facing != CameraCharacteristics.LENS_FACING_BACK && facing != CameraCharacteristics.LENS_FACING_FRONT -> "USB $id"
+                    minF < 2.8f -> "Ширик $id"
+                    minF > 5.5f -> "Теле $id"
+                    else -> "Осн $id"
                 }
-                if (label !in labels) labels.add(label)
+                opts.add(CameraOption(id, label, facing))
             }
-            if ("Ширик" !in labels) labels.add("Ширик")
-            if ("Макро/теле" !in labels) labels.add("Макро/теле")
-            if ("USB/внешняя" !in labels) labels.add("USB/внешняя")
-            if (labels.isNotEmpty()) availableLenses = labels
-        } catch (e: Exception) { Log.e("Diplomka", "lenses", e) }
+            if (opts.isEmpty()) opts.add(CameraOption("0", "Основная", CameraCharacteristics.LENS_FACING_BACK))
+            cameraOptions = opts
+            cameraIndex = 0
+        } catch (e: Exception) {
+            Log.e("Diplomka", "lenses", e)
+            cameraOptions = listOf(CameraOption("0", "Основная", CameraCharacteristics.LENS_FACING_BACK))
+        }
     }
 
     DisposableEffect(Unit) {
@@ -247,9 +267,26 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
     }
 
     val borderColor = if (result?.stopSignal == true || forceStop) Color(0xFFDA3633) else Color(0xFF238636)
+    val selectedCameraId = cameraOptions.getOrNull(cameraIndex)?.id
 
     Box(Modifier.fillMaxSize().background(Color(0xFF0D1117))) {
-        Box(Modifier.fillMaxWidth().fillMaxHeight(if (showLog) 0.56f else 1f).border(3.dp, borderColor)) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(if (showLog) 0.58f else 1f)
+                .border(3.dp, borderColor)
+                .pointerInput(Unit) {
+                    detectTapGestures { offset ->
+                        val nx = (offset.x / size.width).coerceIn(0.05f, 0.95f)
+                        val ny = (offset.y / size.height).coerceIn(0.05f, 0.95f)
+                        screenWaypoint = Offset(nx, ny)
+                        val base = myLocation ?: GeoPoint(55.751244, 37.618423)
+                        if (myLocation == null) myLocation = base
+                        val angleOff = (nx - 0.5f) * 60f
+                        destination = pointAhead(base, myBearing + angleOff, 150.0)
+                    }
+                }
+        ) {
             when {
                 sourceMode == SourceMode.CAMERA && hasCamera -> {
                     StableCameraPreview(
@@ -257,7 +294,7 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                         isRunning = isRunning,
                         analysisExecutor = analysisExecutor,
                         cameraBound = cameraBound,
-                        lensLabel = availableLenses.getOrElse(cameraLensIndex) { "Основная" },
+                        cameraId = selectedCameraId,
                         torchOn = torchOn,
                         onCameraControl = { cameraControlRef = it },
                         onFrame = { bitmap ->
@@ -276,111 +313,128 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                         else Text(if (videoPlaying) "Анализ видео…" else "Видео на паузе", color = Color.White)
                     }
                 }
-                else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Нет камеры — выберите видео", color = Color.White) }
+                else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("Нет камеры — выберите видео", color = Color.White)
+                }
             }
 
             result?.let { r ->
                 DetectionOverlay(
-                    detections = r.detections, targetX = r.targetX, targetY = r.targetY, stopSignal = r.stopSignal,
+                    detections = r.detections,
+                    targetX = r.targetX,
+                    targetY = r.targetY,
+                    stopSignal = r.stopSignal,
                     nnPoint = r.nnNextPoint,
                     autoRotateAngle = if (autoRotate && destination != null) ((bearingToDest - myBearing + 360f) % 360f) else myBearing,
-                    showCompass = true, modifier = Modifier.fillMaxSize()
+                    showCompass = true,
+                    screenWaypoint = screenWaypoint,
+                    modifier = Modifier.fillMaxSize()
                 )
             }
 
-            Column(Modifier.align(Alignment.TopStart).padding(8.dp).background(Color(0xCC0D1117), RoundedCornerShape(8.dp)).padding(8.dp)) {
-                Text("DIPLOMKA", color = Color(0xFF58A6FF), fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                result?.let { r ->
-                    Text("CV " + String.format("%.1f", r.estimatedSpeedMps) + " м/с | " + String.format("%.0f", r.totalDistanceM) + " м | " + r.weather, color = Color(0xFFE6EDF3), fontSize = 10.sp)
-                }
-                Text("Компас: ${myBearing.toInt()}°" + (myLocation?.let { " | GPS " + String.format("%.4f", it.lat) + ", " + String.format("%.4f", it.lon) } ?: " | GPS —"), color = Color(0xFF8B949E), fontSize = 10.sp)
-                if (destination != null) {
-                    Text("Маршрут: " + String.format("%.0f", routeDistanceM) + " м | $turnHint", color = Color(0xFF7EE787), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                }
-                result?.let { r ->
-                    if (r.nearestDistanceM > 0) {
-                        Text("До объекта ≈ " + String.format("%.1f", r.nearestDistanceM) + " м | " + r.bypassHint, color = Color(0xFFFFD700), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                    Text("NN сектор: " + String.format("%+.0f", r.freeSectorDeg) + "°", color = Color(0xFF79C0FF), fontSize = 10.sp)
-                    if (r.sceneBrightness < 55f) {
-                        Text("Темно (" + String.format("%.0f", r.sceneBrightness) + ") — вспышка", color = Color(0xFFFF9800), fontSize = 10.sp)
-                    }
-                }
-                Text("Источник: " + (if (sourceMode == SourceMode.CAMERA) "камера" else "видео") + if (strictStop) " | STOP авто" else " | STOP выкл", color = Color(0xFF8B949E), fontSize = 10.sp)
-            }
-
             if (result?.stopSignal == true || forceStop) {
-                Box(Modifier.align(Alignment.Center).background(Color(0xAA000000), RoundedCornerShape(12.dp)).padding(horizontal = 20.dp, vertical = 10.dp)) {
-                    Text(if (forceStop) "СТОП (ручной)" else "СТОП!", color = Color(0xFFFF6B6B), fontSize = 28.sp, fontWeight = FontWeight.Black)
+                Box(
+                    Modifier.align(Alignment.Center)
+                        .background(Color(0xAA000000), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 24.dp, vertical = 12.dp)
+                ) {
+                    Text(if (forceStop) "СТОП (ручной)" else "СТОП!", color = Color(0xFFFF6B6B), fontSize = 32.sp, fontWeight = FontWeight.Black)
                 }
             }
 
-            Column(Modifier.align(Alignment.BottomEnd).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp), horizontalAlignment = Alignment.End) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    SmallBtn(if (sourceMode == SourceMode.CAMERA) "Видео" else "Камера", Icons.Default.SwapHoriz) {
-                        if (sourceMode == SourceMode.CAMERA) videoPicker.launch("video/*")
-                        else { sourceMode = SourceMode.CAMERA; videoPlaying = false; cameraBound.set(false); pipeline.reset() }
-                    }
-                    SmallBtn("Карта", Icons.Default.Map) { showMap = true }
-                    FilledTonalButton(
-                        onClick = {
+            result?.let { r ->
+                if (r.nearestDistanceM > 0) {
+                    Text(
+                        "≈ " + String.format("%.1f", r.nearestDistanceM) + " м",
+                        color = Color(0xFFFFD700),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.align(Alignment.TopStart).padding(10.dp)
+                            .background(Color(0xAA000000), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Column(
+                Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                IconBtn(
+                    icon = if (menuExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    active = menuExpanded,
+                    tint = Color(0xFF58A6FF)
+                ) { menuExpanded = !menuExpanded }
+
+                AnimatedVisibility(
+                    visible = menuExpanded,
+                    enter = expandVertically(animationSpec = tween(220)) + fadeIn(),
+                    exit = shrinkVertically(animationSpec = tween(180)) + fadeOut()
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        IconBtn(Icons.Default.SwapHoriz, sourceMode == SourceMode.VIDEO) {
+                            if (sourceMode == SourceMode.CAMERA) videoPicker.launch("video/*")
+                            else {
+                                sourceMode = SourceMode.CAMERA
+                                videoPlaying = false
+                                cameraBound.set(false)
+                                pipeline.reset()
+                            }
+                        }
+                        IconBtn(Icons.Default.Map, showMap) { showMap = true }
+                        IconBtn(
+                            if (torchOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                            torchOn,
+                            if (torchOn) Color(0xFFFFC107) else Color.White
+                        ) {
                             torchOn = !torchOn
                             try { cameraControlRef?.enableTorch(torchOn) } catch (_: Exception) {}
-                        },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (torchOn) Color(0xFFFFC107) else Color(0xFF21262D))
-                    ) {
-                        Icon(if (torchOn) Icons.Default.FlashOn else Icons.Default.FlashOff, null, tint = Color.White, modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Вспышка", color = Color.White, fontSize = 11.sp)
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    SmallBtn(availableLenses.getOrElse(cameraLensIndex) { "Камера" }, Icons.Default.Cameraswitch) {
-                        cameraLensIndex = (cameraLensIndex + 1) % max(availableLenses.size, 1)
-                        cameraBound.set(false)
-                        torchOn = false
-                    }
-                    SmallBtn("Поворот", Icons.Default.ScreenRotation) {
-                        val act = context as? Activity
-                        act?.let {
-                            val cur = it.requestedOrientation
-                            it.requestedOrientation = if (
-                                cur == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
-                                cur == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                            ) ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-                            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                         }
-                    }
-                    SmallBtn("Цель 300м", Icons.Default.Flag) {
-                        val base = myLocation ?: GeoPoint(55.751244, 37.618423)
-                        if (myLocation == null) myLocation = base
-                        destination = pointAhead(base, myBearing, 300.0)
-                    }
-                    SmallBtn(if (autoRotate) "Авто" else "Курс", Icons.Default.Explore) { autoRotate = !autoRotate }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    FilledTonalButton(
-                        onClick = { forceStop = !forceStop; pipeline.forceStop = forceStop },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (forceStop) Color(0xFFDA3633) else Color(0xFF6E2A2A))
-                    ) {
-                        Icon(Icons.Default.Stop, null, tint = Color.White, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(if (forceStop) "СТОП ВКЛ" else "СТОП", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-                    SmallBtn(if (strictStop) "Авто+" else "Авто−", Icons.Default.Warning) { strictStop = !strictStop }
-                    SmallBtn(if (showLog) "Лог" else "Лог+", Icons.Default.Terminal) { showLog = !showLog }
-                    FilledTonalButton(
-                        onClick = {
+                        IconBtn(Icons.Default.Cameraswitch) {
+                            if (cameraOptions.isNotEmpty()) {
+                                cameraIndex = (cameraIndex + 1) % cameraOptions.size
+                                cameraBound.set(false)
+                                torchOn = false
+                                Log.i("Diplomka", "Switch camera -> ${cameraOptions[cameraIndex].id}")
+                            }
+                        }
+                        IconBtn(Icons.Default.ScreenRotation) {
+                            val act = context as? Activity
+                            act?.let {
+                                val cur = it.requestedOrientation
+                                it.requestedOrientation = if (
+                                    cur == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+                                    cur == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                ) ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                                else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            }
+                        }
+                        IconBtn(Icons.Default.Flag) {
+                            val base = myLocation ?: GeoPoint(55.751244, 37.618423)
+                            if (myLocation == null) myLocation = base
+                            destination = pointAhead(base, myBearing, 300.0)
+                            screenWaypoint = Offset(0.5f, 0.35f)
+                        }
+                        IconBtn(Icons.Default.Explore, autoRotate) { autoRotate = !autoRotate }
+                        IconBtn(Icons.Default.Stop, forceStop, if (forceStop) Color(0xFFFF6B6B) else Color.White) {
+                            forceStop = !forceStop
+                            pipeline.forceStop = forceStop
+                        }
+                        IconBtn(Icons.Default.Warning, strictStop) { strictStop = !strictStop }
+                        IconBtn(Icons.Default.Terminal, showLog) { showLog = !showLog }
+                        IconBtn(
+                            if (isRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            isRunning,
+                            if (isRunning) Color(0xFFFF6B6B) else Color(0xFF7EE787)
+                        ) {
                             isRunning = !isRunning
                             videoPlaying = isRunning && sourceMode == SourceMode.VIDEO
                             if (!isRunning) pipeline.reset()
-                        },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (isRunning) Color(0xFFDA3633) else Color(0xFF238636))
-                    ) {
-                        Icon(if (isRunning) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                        }
                     }
                 }
             }
@@ -391,7 +445,8 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
                 result?.commands ?: emptyList(),
                 if (destination != null) turnHint else null,
                 if (destination != null) routeDistanceM else null,
-                Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(0.44f)
+                cameraOptions.getOrNull(cameraIndex)?.label,
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(0.42f)
             )
         }
     }
@@ -428,6 +483,19 @@ fun DroneNavigationScreen(hasLocation: Boolean, hasCamera: Boolean) {
 }
 
 @Composable
+private fun IconBtn(icon: ImageVector, active: Boolean = false, tint: Color = Color.White, onClick: () -> Unit) {
+    FilledIconButton(
+        onClick = onClick,
+        modifier = Modifier.size(44.dp),
+        colors = IconButtonDefaults.filledIconButtonColors(
+            containerColor = if (active) Color(0xFF30363D) else Color(0xCC21262D)
+        )
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+    }
+}
+
+@Composable
 fun OfflineNavMap(
     myLocation: GeoPoint?, destination: GeoPoint?, bearing: Float,
     freeSector: Float, nearestM: Float, offlineFile: Uri?, modifier: Modifier = Modifier
@@ -435,7 +503,7 @@ fun OfflineNavMap(
     Column(modifier.background(Color(0xFF0D1117))) {
         Text(
             if (offlineFile != null) "Оффлайн файл: ${offlineFile.lastPathSegment}"
-            else "Оффлайн схема (без интернета). Загрузите карту кнопкой «Файл».",
+            else "Оффлайн схема. Тап по камере ставит точку. Загрузите карту «Файл».",
             color = Color(0xFF8B949E), fontSize = 11.sp, modifier = Modifier.padding(4.dp)
         )
         Canvas(modifier = Modifier.fillMaxSize().padding(8.dp)) {
@@ -475,16 +543,6 @@ fun OfflineNavMap(
     }
 }
 
-@Composable
-private fun SmallBtn(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-        colors = ButtonDefaults.filledTonalButtonColors(containerColor = Color(0xFF21262D))) {
-        Icon(icon, null, tint = Color.White, modifier = Modifier.size(14.dp))
-        Spacer(Modifier.width(4.dp))
-        Text(label, color = Color.White, fontSize = 11.sp)
-    }
-}
-
 private fun pointAhead(from: GeoPoint, bearingDeg: Float, distM: Double): GeoPoint {
     val brng = Math.toRadians(bearingDeg.toDouble()); val R = 6371000.0
     val lat1 = Math.toRadians(from.lat); val lon1 = Math.toRadians(from.lon)
@@ -494,7 +552,10 @@ private fun pointAhead(from: GeoPoint, bearingDeg: Float, distM: Double): GeoPoi
 }
 
 @Composable
-fun CommandLogPanel(commands: List<DroneVisionPipeline.NavigationCommand>, turnHint: String?, routeDistanceM: Float?, modifier: Modifier = Modifier) {
+fun CommandLogPanel(
+    commands: List<DroneVisionPipeline.NavigationCommand>,
+    turnHint: String?, routeDistanceM: Float?, cameraLabel: String?, modifier: Modifier = Modifier
+) {
     val listState = rememberLazyListState()
     val firstTs = commands.firstOrNull()?.timestamp
     LaunchedEffect(firstTs) { if (commands.isNotEmpty()) try { listState.animateScrollToItem(0) } catch (_: Exception) {} }
@@ -503,6 +564,8 @@ fun CommandLogPanel(commands: List<DroneVisionPipeline.NavigationCommand>, turnH
             Icon(Icons.Default.Terminal, null, tint = Color(0xFF58A6FF), modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(6.dp))
             Text("Команды", color = Color(0xFF58A6FF), fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+            Spacer(Modifier.weight(1f))
+            if (cameraLabel != null) Text(cameraLabel, color = Color(0xFF8B949E), fontSize = 10.sp)
         }
         if (turnHint != null && routeDistanceM != null) {
             Text("GPS: $turnHint · " + String.format("%.0f", routeDistanceM) + " м", color = Color(0xFF7EE787), fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
@@ -527,8 +590,22 @@ fun DetectionOverlay(
     detections: List<DroneVisionPipeline.Detection>,
     targetX: Float, targetY: Float, stopSignal: Boolean,
     nnPoint: Pair<Float, Float>,
-    autoRotateAngle: Float, showCompass: Boolean, modifier: Modifier = Modifier
+    autoRotateAngle: Float, showCompass: Boolean,
+    screenWaypoint: Offset?,
+    modifier: Modifier = Modifier
 ) {
+    val infinite = rememberInfiniteTransition(label = "arrow")
+    val pulse by infinite.animateFloat(
+        initialValue = 0.92f, targetValue = 1.12f,
+        animationSpec = infiniteRepeatable(tween(700, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "pulse"
+    )
+    val bob by infinite.animateFloat(
+        initialValue = -4f, targetValue = 4f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Reverse),
+        label = "bob"
+    )
+
     Canvas(modifier = modifier) {
         val w = size.width; val h = size.height
         val textPaint = android.graphics.Paint().apply { textSize = 30f; isAntiAlias = true; isFakeBoldText = true }
@@ -571,15 +648,44 @@ fun DetectionOverlay(
         drawCircle(Color(0xFF69F0AE), 10f, Offset(nx, ny))
         drawLine(Color(0xFF69F0AE), Offset(w / 2f, h * 0.9f), Offset(nx, ny), 3f)
         drawCircle(Color(0xFF00E676), 7f, Offset(targetX * w, targetY * h))
+
+        screenWaypoint?.let { wp ->
+            val px = wp.x * w; val py = wp.y * h
+            drawCircle(Color(0xFFFF5252), 14f, Offset(px, py))
+            drawCircle(Color(0x88FF5252), 28f, Offset(px, py), style = Stroke(3f))
+            drawLine(Color(0xAAFF5252), Offset(w / 2f, h), Offset(px, py), 2.5f)
+        }
+
         if (showCompass) {
-            val cx = w / 2f; val cy = h * 0.82f
+            val cx = w / 2f
+            val cy = h * 0.78f + bob
             rotate(degrees = autoRotateAngle, pivot = Offset(cx, cy)) {
-                val path = Path().apply {
-                    moveTo(cx, cy - 34f); lineTo(cx - 13f, cy + 16f); lineTo(cx, cy + 5f); lineTo(cx + 13f, cy + 16f); close()
+                val s = 1.35f * pulse
+                val shadow = Path().apply {
+                    moveTo(cx + 3f, cy - 52f * s + 4f)
+                    lineTo(cx - 20f * s + 3f, cy + 26f * s + 4f)
+                    lineTo(cx + 3f, cy + 8f * s + 4f)
+                    lineTo(cx + 20f * s + 3f, cy + 26f * s + 4f)
+                    close()
                 }
-                drawPath(path, Color(0xFFFFD740))
+                drawPath(shadow, Color(0x66000000))
+                val body = Path().apply {
+                    moveTo(cx, cy - 52f * s)
+                    lineTo(cx - 20f * s, cy + 26f * s)
+                    lineTo(cx, cy + 8f * s)
+                    lineTo(cx + 20f * s, cy + 26f * s)
+                    close()
+                }
+                drawPath(body, Color(0xFFFFD740))
+                val highlight = Path().apply {
+                    moveTo(cx, cy - 52f * s)
+                    lineTo(cx - 8f * s, cy + 2f * s)
+                    lineTo(cx, cy + 8f * s)
+                    close()
+                }
+                drawPath(highlight, Color(0xFFFFF59D))
             }
-            drawCircle(Color(0x55FFD740), 40f, Offset(cx, cy), style = Stroke(1.5f))
+            drawCircle(Color(0x55FFD740), 48f * pulse, Offset(cx, cy), style = Stroke(2f))
         }
         if (stopSignal) drawRect(Color(0x44FF0000), Offset.Zero, Size(w, h))
     }
@@ -591,7 +697,7 @@ fun StableCameraPreview(
     isRunning: Boolean,
     analysisExecutor: java.util.concurrent.Executor,
     cameraBound: AtomicBoolean,
-    lensLabel: String = "Основная",
+    cameraId: String?,
     torchOn: Boolean = false,
     onCameraControl: (CameraControl?) -> Unit = {},
     onFrame: (Bitmap) -> Unit
@@ -607,7 +713,7 @@ fun StableCameraPreview(
     val runningState = rememberUpdatedState(isRunning)
     val onFrameState = rememberUpdatedState(onFrame)
     AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-    DisposableEffect(lifecycleOwner, lensLabel) {
+    DisposableEffect(lifecycleOwner, cameraId) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val executor = ContextCompat.getMainExecutor(context)
         val listener = Runnable {
@@ -633,12 +739,36 @@ fun StableCameraPreview(
                     finally { imageProxy.close() }
                 }
                 cameraProvider.unbindAll()
-                val selector = buildCameraSelector(lensLabel)
+                val selector = buildCameraSelectorById(cameraId)
                 val camera = cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
                 onCameraControl(camera.cameraControl)
                 try { camera.cameraControl.enableTorch(torchOn) } catch (_: Exception) {}
                 cameraBound.set(true)
-            } catch (e: Exception) { Log.e("Diplomka", "bind", e) }
+                Log.i("Diplomka", "Bound camera id=$cameraId")
+            } catch (e: Exception) {
+                Log.e("Diplomka", "bind id=$cameraId", e)
+                try {
+                    val cameraProvider = cameraProviderFuture.get()
+                    cameraProvider.unbindAll()
+                    val preview = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_16_9).build()
+                        .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                    val analysis = ImageAnalysis.Builder()
+                        .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build()
+                    analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                        if (!runningState.value) { imageProxy.close(); return@setAnalyzer }
+                        try {
+                            val bitmap = imageProxy.toBitmap()
+                            onFrameState.value(bitmap)
+                        } catch (_: Exception) {}
+                        finally { imageProxy.close() }
+                    }
+                    val camera = cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                    onCameraControl(camera.cameraControl)
+                    cameraBound.set(true)
+                } catch (e2: Exception) { Log.e("Diplomka", "fallback bind", e2) }
+            }
         }
         cameraProviderFuture.addListener(listener, executor)
         onDispose {
@@ -650,58 +780,17 @@ fun StableCameraPreview(
 }
 
 @OptIn(ExperimentalCamera2Interop::class)
-private fun buildCameraSelector(lensLabel: String): CameraSelector {
-    return when {
-        lensLabel.contains("Ширик", ignoreCase = true) -> {
-            CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
-                .addCameraFilter { cameras ->
-                    val wide = cameras.filter { cam ->
-                        val f = try {
-                            Camera2CameraInfo.from(cam).getCameraCharacteristic(
-                                CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
-                            )
-                        } catch (_: Exception) { null }
-                        val minF = f?.minOrNull() ?: 99f
-                        minF < 3.2f
-                    }
-                    if (wide.isNotEmpty()) wide else cameras.filter {
-                        it.lensFacing == CameraSelector.LENS_FACING_BACK
-                    }
-                }.build()
+private fun buildCameraSelectorById(cameraId: String?): CameraSelector {
+    if (cameraId.isNullOrBlank()) return CameraSelector.DEFAULT_BACK_CAMERA
+    return CameraSelector.Builder()
+        .addCameraFilter { cameraInfos ->
+            val match = cameraInfos.filter { info ->
+                try { Camera2CameraInfo.from(info).cameraId == cameraId } catch (_: Exception) { false }
+            }
+            if (match.isNotEmpty()) match
+            else cameraInfos.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
         }
-        lensLabel.contains("Макро", ignoreCase = true) || lensLabel.contains("теле", ignoreCase = true) -> {
-            CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
-                .addCameraFilter { cameras ->
-                    val macro = cameras.filter { cam ->
-                        val f = try {
-                            Camera2CameraInfo.from(cam).getCameraCharacteristic(
-                                CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
-                            )
-                        } catch (_: Exception) { null }
-                        val minF = f?.minOrNull() ?: 0f
-                        minF > 5.0f
-                    }
-                    if (macro.isNotEmpty()) macro else cameras.filter {
-                        it.lensFacing == CameraSelector.LENS_FACING_BACK
-                    }
-                }.build()
-        }
-        lensLabel.contains("USB", ignoreCase = true) || lensLabel.contains("внеш", ignoreCase = true) -> {
-            CameraSelector.Builder()
-                .addCameraFilter { cameras ->
-                    val ext = cameras.filter {
-                        it.lensFacing != CameraSelector.LENS_FACING_FRONT &&
-                            it.lensFacing != CameraSelector.LENS_FACING_BACK
-                    }
-                    if (ext.isNotEmpty()) ext else cameras.filter {
-                        it.lensFacing == CameraSelector.LENS_FACING_BACK
-                    }
-                }.build()
-        }
-        else -> CameraSelector.DEFAULT_BACK_CAMERA
-    }
+        .build()
 }
 
 fun ImageProxy.toBitmap(): Bitmap {
