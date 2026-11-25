@@ -1,8 +1,6 @@
 #include <android_native_app_glue.h>
 
 #include <algorithm>
-#include <array>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -12,6 +10,7 @@
 #include <vector>
 
 #include <android/asset_manager.h>
+#include <android/configuration.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/sensor.h>
@@ -75,12 +74,39 @@ struct AppState {
     bool cameraStarted = false;
     int cameraRetryCount = 0;
     std::chrono::steady_clock::time_point lastCameraAttempt{};
+
+    float uiScale = 1.0f;
 };
 
 void pushLog(AppState& state, const std::string& line) {
     std::lock_guard<std::mutex> lock(state.logMutex);
     state.commandLog.push_front(line);
-    while (state.commandLog.size() > 40) state.commandLog.pop_back();
+    while (state.commandLog.size() > 30) state.commandLog.pop_back();
+}
+
+bool jniHasCameraPermission(android_app* app) {
+    if (!app || !app->activity || !app->activity->vm || !app->activity->clazz) return false;
+    JavaVM* vm = app->activity->vm;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return false;
+        attached = true;
+    }
+
+    bool granted = false;
+    jclass activityClass = env->GetObjectClass(app->activity->clazz);
+    jmethodID checkSelf = env->GetMethodID(activityClass, "checkSelfPermission", "(Ljava/lang/String;)I");
+    jstring perm = env->NewStringUTF("android.permission.CAMERA");
+    if (checkSelf && perm) {
+        // PackageManager.PERMISSION_GRANTED == 0
+        jint result = env->CallIntMethod(app->activity->clazz, checkSelf, perm);
+        granted = (result == 0);
+    }
+    if (perm) env->DeleteLocalRef(perm);
+    if (activityClass) env->DeleteLocalRef(activityClass);
+    if (attached) vm->DetachCurrentThread();
+    return granted;
 }
 
 bool initEgl(android_app* app, EglState& egl) {
@@ -111,7 +137,6 @@ bool initEgl(android_app* app, EglState& egl) {
     const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
     egl.context = eglCreateContext(egl.display, config, EGL_NO_CONTEXT, contextAttribs);
     if (egl.context == EGL_NO_CONTEXT) return false;
-
     if (!eglMakeCurrent(egl.display, egl.surface, egl.surface, egl.context)) return false;
 
     eglQuerySurface(egl.display, egl.surface, EGL_WIDTH, &egl.width);
@@ -131,21 +156,59 @@ void shutdownEgl(EglState& egl) {
     egl.context = EGL_NO_CONTEXT;
 }
 
-void initImGui(android_app* app, EglState& egl) {
+float computeUiScale(android_app* app) {
+    float scale = 2.0f;
+    if (app && app->config) {
+        const int32_t density = AConfiguration_getDensity(app->config);
+        if (density > 0) scale = density / 160.0f;
+    }
+    // Clamp for phones: readable but not huge
+    return std::clamp(scale, 1.5f, 3.5f);
+}
+
+void initImGui(android_app* app, EglState& egl, float uiScale) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+
     ImGui::StyleColorsDark();
-    // Larger touch targets for phone use
     ImGuiStyle& style = ImGui::GetStyle();
-    style.TouchExtraPadding = ImVec2(8.0f, 8.0f);
-    style.ItemSpacing = ImVec2(10.0f, 12.0f);
-    style.FramePadding = ImVec2(12.0f, 10.0f);
+    style.ScaleAllSizes(uiScale * 0.85f);
+    style.TouchExtraPadding = ImVec2(12.0f * uiScale, 12.0f * uiScale);
+    style.WindowRounding = 0.0f;
+    style.ChildRounding = 12.0f;
+    style.FrameRounding = 10.0f;
+    style.GrabRounding = 8.0f;
+    style.FramePadding = ImVec2(14.0f, 12.0f);
+    style.ItemSpacing = ImVec2(12.0f, 14.0f);
+    style.WindowPadding = ImVec2(12.0f, 12.0f);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.07f, 0.09f, 0.92f);
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.08f, 0.09f, 0.12f, 0.88f);
+    style.Colors[ImGuiCol_Button] = ImVec4(0.16f, 0.42f, 0.72f, 1.0f);
+    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.52f, 0.85f, 1.0f);
+    style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.12f, 0.35f, 0.62f, 1.0f);
+    style.Colors[ImGuiCol_Header] = ImVec4(0.16f, 0.42f, 0.72f, 0.55f);
+    style.Colors[ImGuiCol_Text] = ImVec4(0.95f, 0.96f, 0.98f, 1.0f);
+
+    // Larger default font for phone screens
+    const float fontSize = 18.0f * uiScale;
+    io.Fonts->Clear();
+    io.Fonts->AddFontDefault();
+    ImFontConfig cfg{};
+    cfg.SizePixels = fontSize;
+    cfg.OversampleH = 2;
+    cfg.OversampleV = 2;
+    cfg.PixelSnapH = true;
+    io.Fonts->AddFontDefault(&cfg);
+    io.FontDefault = io.Fonts->Fonts.back();
+
     ImGui_ImplAndroid_Init(app->window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
     io.DisplaySize = ImVec2(static_cast<float>(egl.width), static_cast<float>(egl.height));
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 }
 
 void shutdownImGui() {
@@ -156,9 +219,7 @@ void shutdownImGui() {
 
 void uploadPreviewTexture(AppState& state, const uint8_t* rgba, int w, int h) {
     if (!rgba || w <= 0 || h <= 0) return;
-    if (state.previewTexture == 0) {
-        glGenTextures(1, &state.previewTexture);
-    }
+    if (state.previewTexture == 0) glGenTextures(1, &state.previewTexture);
     glBindTexture(GL_TEXTURE_2D, state.previewTexture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -184,6 +245,14 @@ float proximityFromBox(const RectF& box, int frameW, int frameH) {
 void tryStartCamera(AppState& state) {
     state.lastCameraAttempt = std::chrono::steady_clock::now();
     state.cameraRetryCount++;
+
+    if (!jniHasCameraPermission(state.app)) {
+        state.cameraStarted = false;
+        pushLog(state, "No CAMERA permission — allow in system dialog / Settings");
+        LOGW("CAMERA permission not granted");
+        return;
+    }
+
     const bool ok = state.camera.start([&state](std::vector<uint8_t>&& rgba, int w, int h) {
         std::lock_guard<std::mutex> lock(state.frameMutex);
         state.latestRgba = std::move(rgba);
@@ -195,111 +264,166 @@ void tryStartCamera(AppState& state) {
     if (ok) {
         pushLog(state, "Camera started (try " + std::to_string(state.cameraRetryCount) + ")");
     } else {
-        pushLog(state, "Camera start FAILED (try " + std::to_string(state.cameraRetryCount) +
-                        ") — check CAMERA permission");
+        pushLog(state, "Camera open failed (try " + std::to_string(state.cameraRetryCount) + ")");
     }
 }
 
+bool bigButton(const char* label, const ImVec2& size, bool activeTone = false) {
+    if (activeTone) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.35f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.65f, 0.42f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.45f, 0.28f, 1.0f));
+    }
+    const bool pressed = ImGui::Button(label, size);
+    if (activeTone) ImGui::PopStyleColor(3);
+    return pressed;
+}
+
 void drawUi(AppState& state, EglState& egl) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(static_cast<float>(egl.width), static_cast<float>(egl.height));
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float W = vp->WorkSize.x;
+    const float H = vp->WorkSize.y;
+    const float pad = 12.0f * state.uiScale;
+    const float btnH = 52.0f * state.uiScale;
+
+    // Full-screen root (transparent so we can draw camera behind via Image)
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGui::Begin("Diplomka Native", nullptr,
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("root", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus);
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                 ImGuiWindowFlags_NoScrollbar);
 
-    // Left: camera preview + overlays
-    ImGui::BeginChild("preview", ImVec2(vp->WorkSize.x * 0.68f, 0), true);
+    // ---- Camera layer (full screen) ----
     {
-        const ImVec2 avail = ImGui::GetContentRegionAvail();
-        if (state.previewTexture && state.previewTextureWidth > 0 && state.previewTextureHeight > 0) {
-            const float aspect = static_cast<float>(state.previewTextureWidth) / state.previewTextureHeight;
-            ImVec2 size = avail;
-            if (size.x / size.y > aspect) size.x = size.y * aspect;
-            else size.y = size.x / aspect;
-            ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(state.previewTexture)), size);
-
-            const ImVec2 p0 = ImGui::GetItemRectMin();
-            const ImVec2 p1 = ImGui::GetItemRectMax();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 p0 = ImGui::GetWindowPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (state.previewTexture && state.previewTextureWidth > 0) {
+            // Cover-fit the preview
+            const float texAspect = static_cast<float>(state.previewTextureWidth) / state.previewTextureHeight;
+            const float screenAspect = W / H;
+            ImVec2 size, off;
+            if (screenAspect > texAspect) {
+                size = ImVec2(W, W / texAspect);
+                off = ImVec2(0, (H - size.y) * 0.5f);
+            } else {
+                size = ImVec2(H * texAspect, H);
+                off = ImVec2((W - size.x) * 0.5f, 0);
+            }
+            dl->AddImage(static_cast<ImTextureID>(static_cast<uintptr_t>(state.previewTexture)),
+                         ImVec2(p0.x + off.x, p0.y + off.y),
+                         ImVec2(p0.x + off.x + size.x, p0.y + off.y + size.y));
 
             if (state.stopSignal) {
-                dl->AddRectFilled(p0, p1, IM_COL32(180, 20, 20, 70));
-                dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(255, 80, 80, 255), "STOP");
+                dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + H), IM_COL32(180, 20, 20, 90));
+                const char* stop = "STOP";
+                const ImVec2 ts = ImGui::CalcTextSize(stop);
+                dl->AddText(ImVec2(p0.x + (W - ts.x) * 0.5f, p0.y + H * 0.42f),
+                            IM_COL32(255, 70, 70, 255), stop);
             }
         } else {
-            ImGui::TextUnformatted("Waiting for camera...");
-            ImGui::Spacing();
-            if (!state.cameraStarted) {
-                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
-                                   "Camera not started.\nGrant CAMERA permission\nand tap Restart Camera.");
-            } else if (state.camera.framesReceived() == 0) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
-                                   "Camera open, no frames yet.\nPermission may still be pending.");
+            dl->AddRectFilled(p0, ImVec2(p0.x + W, p0.y + H), IM_COL32(12, 14, 18, 255));
+            const char* msg = state.cameraStarted
+                                  ? "Camera open \xe2\x80\x94 waiting for frames..."
+                                  : "Camera offline";
+            const ImVec2 ts = ImGui::CalcTextSize(msg);
+            dl->AddText(ImVec2(p0.x + (W - ts.x) * 0.5f, p0.y + H * 0.40f),
+                        IM_COL32(220, 220, 230, 255), msg);
+            if (!jniHasCameraPermission(state.app)) {
+                const char* hint = "Grant CAMERA permission, then tap Restart";
+                const ImVec2 hs = ImGui::CalcTextSize(hint);
+                dl->AddText(ImVec2(p0.x + (W - hs.x) * 0.5f, p0.y + H * 0.40f + ts.y + 12),
+                            IM_COL32(255, 160, 80, 255), hint);
             }
         }
     }
-    ImGui::EndChild();
 
-    ImGui::SameLine();
-
-    // Right rail: controls + log
-    ImGui::BeginChild("rail", ImVec2(0, 0), true);
+    // ---- Top HUD ----
+    ImGui::SetCursorPos(ImVec2(pad, pad));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.05f, 0.06f, 0.08f, 0.72f));
+    ImGui::BeginChild("hud", ImVec2(W - pad * 2, 56.0f * state.uiScale), true,
+                      ImGuiWindowFlags_NoScrollbar);
     {
-        ImGui::Text("Diplomka Native C++");
-        ImGui::Separator();
+        const char* camState = state.camera.isRunning()
+                                   ? (state.camera.framesReceived() > 0 ? "LIVE" : "NO FRAMES")
+                                   : "OFF";
+        ImGui::Text("Diplomka  |  %s  frames=%d", camState, state.camera.framesReceived());
+        ImGui::SameLine(std::max(10.0f, W - pad * 2 - 220.0f * state.uiScale));
+        if (state.sensors.hasHeading()) {
+            ImGui::Text("HDG %d\xc2\xb0", static_cast<int>(state.sensors.headingDegrees()));
+        } else {
+            ImGui::TextUnformatted("HDG --");
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 
-        if (ImGui::Button(state.torchOn ? "Torch OFF" : "Torch ON", ImVec2(-1, 48))) {
+    // ---- Bottom control panel ----
+    const float panelH = (btnH * 2) + pad * 4 + 70.0f * state.uiScale;
+    ImGui::SetCursorPos(ImVec2(pad, H - panelH - pad));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.07f, 0.10f, 0.88f));
+    ImGui::BeginChild("controls", ImVec2(W - pad * 2, panelH), true);
+    {
+        const float innerW = ImGui::GetContentRegionAvail().x;
+        const float gap = 10.0f * state.uiScale;
+        const float half = (innerW - gap) * 0.5f;
+
+        if (bigButton(state.torchOn ? "Torch  ON" : "Torch  OFF", ImVec2(half, btnH), state.torchOn)) {
             state.torchOn = !state.torchOn;
             state.camera.setTorch(state.torchOn);
             pushLog(state, state.torchOn ? "Torch enabled" : "Torch disabled");
         }
-        if (ImGui::Button(state.detectionEnabled ? "Detection ON" : "Detection OFF", ImVec2(-1, 48))) {
+        ImGui::SameLine(0, gap);
+        if (bigButton(state.detectionEnabled ? "Detect  ON" : "Detect  OFF", ImVec2(half, btnH), state.detectionEnabled)) {
             state.detectionEnabled = !state.detectionEnabled;
-            pushLog(state, state.detectionEnabled ? "Detection enabled" : "Detection paused");
+            pushLog(state, state.detectionEnabled ? "Detection on" : "Detection off");
         }
-        if (ImGui::Button(state.showPose ? "Pose ON" : "Pose OFF", ImVec2(-1, 48))) {
+
+        if (bigButton(state.showPose ? "Pose  ON" : "Pose  OFF", ImVec2(half, btnH), state.showPose)) {
             state.showPose = !state.showPose;
         }
-        if (ImGui::Button("Restart Camera", ImVec2(-1, 48))) {
+        ImGui::SameLine(0, gap);
+        if (bigButton("Restart Camera", ImVec2(half, btnH))) {
             state.camera.stop();
             state.cameraStarted = false;
             tryStartCamera(state);
         }
 
+        ImGui::Spacing();
         ImGui::Separator();
-        ImGui::Text("Cam: %s  frames=%d",
-                    state.camera.isRunning() ? "RUN" : "OFF",
-                    state.camera.framesReceived());
-        ImGui::Text("Heading: %s", state.sensors.hasHeading() ?
-                    (std::to_string(static_cast<int>(state.sensors.headingDegrees())) + " deg").c_str() : "--");
-        ImGui::Text("Infer: %.1f ms", state.lastInferenceMs);
-        ImGui::Text("Dets: %d  Poses: %d", state.detectionCount, state.poseCount);
+        ImGui::Text("Infer %.0f ms   |   Dets %d   |   Poses %d",
+                    state.lastInferenceMs, state.detectionCount, state.poseCount);
         if (state.stopSignal) {
-            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "STOP — obstacle near");
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "STOP — obstacle near");
         }
 
-        ImGui::Separator();
-        ImGui::TextUnformatted("Command log");
-        ImGui::BeginChild("log", ImVec2(0, 0), true);
+        // Compact log (last 3 lines)
         {
             std::lock_guard<std::mutex> lock(state.logMutex);
+            int shown = 0;
             for (const auto& line : state.commandLog) {
-                ImGui::TextUnformatted(line.c_str());
+                ImGui::TextColored(ImVec4(0.75f, 0.78f, 0.85f, 1.0f), "%s", line.c_str());
+                if (++shown >= 3) break;
             }
         }
-        ImGui::EndChild();
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor();
 
     ImGui::End();
+    ImGui::PopStyleVar();
+
     ImGui::Render();
     glViewport(0, 0, egl.width, egl.height);
-    glClearColor(0.05f, 0.05f, 0.07f, 1.0f);
+    glClearColor(0.04f, 0.045f, 0.06f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     eglSwapBuffers(egl.display, egl.surface);
@@ -320,20 +444,26 @@ void handleAppCmd(android_app* app, int32_t cmd) {
         case APP_CMD_LOST_FOCUS:
             state->animating = false;
             break;
+        case APP_CMD_CONFIG_CHANGED:
+            if (app->config) state->uiScale = computeUiScale(app);
+            break;
         default:
             break;
     }
 }
 
 int32_t handleInput(android_app* app, AInputEvent* event) {
-    if (ImGui_ImplAndroid_HandleInputEvent(event))
-        return 1;
+    // Always feed ImGui; return 1 so the event is considered handled.
+    if (ImGui_ImplAndroid_HandleInputEvent(event) != 0) return 1;
+    // Still consume motion events so the system does not steal them.
+    if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) return 1;
     return 0;
 }
 
 void engineLoop(android_app* app) {
     AppState state;
     state.app = app;
+    state.uiScale = computeUiScale(app);
     app->userData = &state;
     app->onAppCmd = handleAppCmd;
     app->onInputEvent = handleInput;
@@ -351,27 +481,41 @@ void engineLoop(android_app* app) {
 
         if (app->window && egl.display == EGL_NO_DISPLAY) {
             if (initEgl(app, egl)) {
-                initImGui(app, egl);
+                state.uiScale = computeUiScale(app);
+                initImGui(app, egl, state.uiScale);
                 state.imguiInitialized = true;
 
                 AAssetManager* assets = app->activity->assetManager;
                 state.vision.initialize(assets);
                 state.sensors.start(app->looper);
-
-                // Slight delay: Java MainActivity may still be showing the permission dialog.
                 tryStartCamera(state);
+            }
+        }
+
+        // Update surface size if rotated / changed
+        if (egl.display != EGL_NO_DISPLAY && app->window) {
+            EGLint w = 0, h = 0;
+            eglQuerySurface(egl.display, egl.surface, EGL_WIDTH, &w);
+            eglQuerySurface(egl.display, egl.surface, EGL_HEIGHT, &h);
+            if (w > 0 && h > 0 && (w != egl.width || h != egl.height)) {
+                egl.width = w;
+                egl.height = h;
             }
         }
 
         if (egl.display == EGL_NO_DISPLAY || !state.animating) continue;
 
-        // Auto-retry camera a few times if no frames (permission granted after first open attempt).
-        if (state.cameraStarted && state.camera.framesReceived() == 0 && state.cameraRetryCount < 6) {
+        // Retry camera after permission grant
+        if ((!state.cameraStarted || state.camera.framesReceived() == 0) && state.cameraRetryCount < 8) {
             const auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - state.lastCameraAttempt).count() >= 2) {
-                LOGW("No frames after 2s — restarting camera (permission?)");
-                state.camera.stop();
-                tryStartCamera(state);
+                if (jniHasCameraPermission(state.app)) {
+                    LOGW("Retrying camera after permission/check...");
+                    state.camera.stop();
+                    tryStartCamera(state);
+                } else {
+                    state.lastCameraAttempt = now;
+                }
             }
         }
 
@@ -391,7 +535,6 @@ void engineLoop(android_app* app) {
 
         if (!frameCopy.empty()) {
             uploadPreviewTexture(state, frameCopy.data(), fw, fh);
-
             const bool runPose = state.showPose && (state.detectionCount % 2 == 0);
             VisionFrame vf = state.vision.processRgba(frameCopy.data(), fw, fh, state.detectionEnabled, runPose);
             state.lastInferenceMs = vf.inferenceMs;
