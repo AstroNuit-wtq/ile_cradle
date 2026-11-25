@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-feature android:name="android.hardware.sensor.compass" android:required="false" />
+
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -10,11 +12,11 @@
     <application
         android:allowBackup="false"
         android:label="Diplomka Native"
-        android:hasCode="false"
+        android:hasCode="true"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
         android:usesCleartextTraffic="false">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="com.diplomka.app.MainActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode"
             android:exported="true"
             android:screenOrientation="portrait"
