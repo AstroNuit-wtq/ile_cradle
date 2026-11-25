@@ -1,6 +1,7 @@
 #include "camera_engine.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -13,13 +14,14 @@
 
 #define LOG_TAG "DiplomkaNative-Camera"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
 inline uint8_t clampByte(int value) {
     return static_cast<uint8_t>(std::max(0, std::min(255, value)));
 }
-}
+} // namespace
 
 CameraEngine::~CameraEngine() {
     stop();
@@ -44,13 +46,40 @@ bool CameraEngine::chooseBackCamera() {
         const bool hasFacing = ACameraMetadata_getConstEntry(metadata, ACAMERA_LENS_FACING, &facing) == ACAMERA_OK;
         if (hasFacing && facing.count > 0 && facing.data.u8[0] == ACAMERA_LENS_FACING_BACK) {
             cameraId_ = ids->cameraIds[i];
+            // Prefer a moderate preview size (~720p or closest to 640x480).
+            ACameraMetadata_const_entry streamConfig{};
+            if (ACameraMetadata_getConstEntry(metadata, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &streamConfig) == ACAMERA_OK) {
+                int bestW = 640, bestH = 480;
+                int bestScore = INT32_MAX;
+                for (uint32_t j = 0; j + 3 < streamConfig.count; j += 4) {
+                    const int32_t fmt = streamConfig.data.i32[j + 0];
+                    const int32_t w   = streamConfig.data.i32[j + 1];
+                    const int32_t h   = streamConfig.data.i32[j + 2];
+                    const int32_t isInput = streamConfig.data.i32[j + 3];
+                    if (isInput != 0) continue;
+                    if (fmt != AIMAGE_FORMAT_YUV_420_888) continue;
+                    // Prefer landscape-ish sizes around 640–1280 width.
+                    const int score = std::abs(w - 960) + std::abs(h - 720);
+                    if (score < bestScore && w >= 320 && h >= 240 && w <= 1920) {
+                        bestScore = score;
+                        bestW = w;
+                        bestH = h;
+                    }
+                }
+                width_ = bestW;
+                height_ = bestH;
+                LOGI("Selected stream size %dx%d for camera %s", width_, height_, cameraId_.c_str());
+            }
             ACameraMetadata_free(metadata);
             break;
         }
         ACameraMetadata_free(metadata);
     }
 
-    if (cameraId_.empty() && ids->numCameras > 0) cameraId_ = ids->cameraIds[0];
+    if (cameraId_.empty() && ids->numCameras > 0) {
+        cameraId_ = ids->cameraIds[0];
+        LOGW("No back camera, falling back to %s", cameraId_.c_str());
+    }
     ACameraManager_deleteCameraIdList(ids);
     return !cameraId_.empty();
 }
@@ -73,7 +102,7 @@ bool CameraEngine::start(FrameConsumer consumer) {
 
     media_status_t mediaStatus = AImageReader_new(width_, height_, AIMAGE_FORMAT_YUV_420_888, 4, &reader_);
     if (mediaStatus != AMEDIA_OK || !reader_) {
-        LOGE("AImageReader_new failed: %d", mediaStatus);
+        LOGE("AImageReader_new failed: %d (size %dx%d)", mediaStatus, width_, height_);
         stop();
         return false;
     }
@@ -91,7 +120,7 @@ bool CameraEngine::start(FrameConsumer consumer) {
 
     camera_status_t cameraStatus = ACameraManager_openCamera(manager_, cameraId_.c_str(), &deviceCallbacks, &device_);
     if (cameraStatus != ACAMERA_OK || !device_) {
-        LOGE("openCamera failed: %d", cameraStatus);
+        LOGE("openCamera failed: %d (permission?)", cameraStatus);
         stop();
         return false;
     }
@@ -141,6 +170,7 @@ bool CameraEngine::start(FrameConsumer consumer) {
     }
 
     running_ = true;
+    framesReceived_ = 0;
     LOGI("Camera started: %s (%dx%d)", cameraId_.c_str(), width_, height_);
     return true;
 }
@@ -215,7 +245,12 @@ void CameraEngine::consumeLatestImage(AImageReader* reader) {
     if (!running_) return;
     AImage* image = nullptr;
     media_status_t status = AImageReader_acquireLatestImage(reader, &image);
-    if (status != AMEDIA_OK || !image) return;
+    if (status != AMEDIA_OK || !image) {
+        if (status != AMEDIA_ERROR_INVALID_PARAMETER) {
+            LOGW("acquireLatestImage status=%d", status);
+        }
+        return;
+    }
 
     int32_t width = 0, height = 0;
     AImage_getWidth(image, &width);
@@ -237,8 +272,8 @@ void CameraEngine::consumeLatestImage(AImageReader* reader) {
         AImage_getPlanePixelStride(image, 1, &pixelU) == AMEDIA_OK &&
         AImage_getPlanePixelStride(image, 2, &pixelV) == AMEDIA_OK;
 
-    if (ok && width > 0 && height > 0) {
-        std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
+    if (ok && width > 0 && height > 0 && planeY && planeU && planeV) {
+        std::vector<uint8_t> rgba(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
         for (int y = 0; y < height; ++y) {
             const int uvY = y / 2;
             for (int x = 0; x < width; ++x) {
@@ -251,7 +286,7 @@ void CameraEngine::consumeLatestImage(AImageReader* reader) {
                 const int uu = static_cast<int>(planeU[uIndex]) - 128;
                 const int vv = static_cast<int>(planeV[vIndex]) - 128;
                 const int c = 298 * yy;
-                const size_t index = (static_cast<size_t>(y) * width + x) * 4;
+                const size_t index = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4;
                 rgba[index + 0] = clampByte((c + 409 * vv + 128) >> 8);
                 rgba[index + 1] = clampByte((c - 100 * uu - 208 * vv + 128) >> 8);
                 rgba[index + 2] = clampByte((c + 516 * uu + 128) >> 8);
@@ -264,7 +299,15 @@ void CameraEngine::consumeLatestImage(AImageReader* reader) {
             std::lock_guard<std::mutex> lock(consumerMutex_);
             callback = consumer_;
         }
-        if (callback) callback(std::move(rgba), width, height);
+        if (callback) {
+            callback(std::move(rgba), width, height);
+            const int n = ++framesReceived_;
+            if (n == 1 || n % 60 == 0) {
+                LOGI("Frame #%d delivered (%dx%d)", n, width, height);
+            }
+        }
+    } else {
+        LOGW("YUV plane read failed ok=%d w=%d h=%d", ok ? 1 : 0, width, height);
     }
 
     AImage_delete(image);
@@ -286,6 +329,12 @@ void CameraEngine::onCameraError(void* context, ACameraDevice*, int error) {
     }
 }
 
-void CameraEngine::onSessionClosed(void*, ACameraCaptureSession*) {}
-void CameraEngine::onSessionReady(void*, ACameraCaptureSession*) {}
-void CameraEngine::onSessionActive(void*, ACameraCaptureSession*) {}
+void CameraEngine::onSessionClosed(void*, ACameraCaptureSession*) {
+    LOGI("Capture session closed");
+}
+void CameraEngine::onSessionReady(void*, ACameraCaptureSession*) {
+    LOGI("Capture session ready");
+}
+void CameraEngine::onSessionActive(void*, ACameraCaptureSession*) {
+    LOGI("Capture session active");
+}
