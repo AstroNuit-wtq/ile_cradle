@@ -64,7 +64,6 @@ find_library(gles-lib GLESv3)
 find_library(camera-lib camera2ndk)
 find_library(media-lib mediandk)
 
-# ncnn is supplied as a prebuilt Android package by the workflow.
 target_link_libraries(diplomka_native PRIVATE
     imgui_android
     ncnn
