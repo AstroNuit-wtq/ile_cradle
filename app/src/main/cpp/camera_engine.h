@@ -21,6 +21,8 @@ public:
     CameraEngine() = default;
     ~CameraEngine();
 
+    // Opens back camera (YUV_420_888), starts preview pipeline.
+    // Returns true if open+session were created; frames may arrive slightly later.
     bool start(FrameConsumer consumer);
     void stop();
     bool setTorch(bool enabled);
@@ -43,6 +45,7 @@ private:
     void consumeLatestImage(AImageReader* reader);
     bool chooseBackCamera();
     bool startRepeating();
+    void setError(const char* msg);
 
     ACameraManager* manager_ = nullptr;
     ACameraDevice* device_ = nullptr;
@@ -55,12 +58,14 @@ private:
     ACaptureSessionOutput* sessionOutput_ = nullptr;
     std::string cameraId_;
 
+    std::mutex lifecycleMutex_;
     std::mutex consumerMutex_;
     FrameConsumer consumer_;
     int width_ = 640;
     int height_ = 480;
     std::atomic<bool> running_{false};
     std::atomic<bool> sessionActive_{false};
+    std::atomic<bool> repeatingStarted_{false};
     std::atomic<int> framesReceived_{0};
     std::string lastError_;
     bool torchEnabled_ = false;
