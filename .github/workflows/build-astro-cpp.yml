@@ -83,7 +83,7 @@ jobs:
           echo "src_dir=$SRC_DIR" >> "$GITHUB_OUTPUT"
           echo "Using source: $SRC_DIR"
 
-      - name: Download NCNN Android CPU runtime
+      - name: Download NCNN Android CPU runtime (arm64-v8a)
         id: ncnn
         shell: bash
         run: |
@@ -96,11 +96,18 @@ jobs:
           echo '62a9edb493ceb42a5c9cbf2d3a79b3f44bff06c625134ffb64d183dcc42c25fc  ncnn-android.zip' > "$RUNNER_TEMP/ncnn.sha256"
           (cd "$RUNNER_TEMP" && sha256sum --check ncnn.sha256)
           unzip -q "$RUNNER_TEMP/ncnn-android.zip" -d "$DEP"
-          CONFIG="$(find "$DEP" -name ncnnConfig.cmake -print -quit)"
-          test -n "$CONFIG" || { echo 'ncnnConfig.cmake was not found in NCNN archive'; find "$DEP" -maxdepth 5 -type f | head -80; exit 1; }
+
+          # Prefer arm64-v8a explicitly — do not pick x86 / armeabi-v7a by accident
+          CONFIG="$(find "$DEP" -path '*/arm64-v8a/lib/cmake/ncnn/ncnnConfig.cmake' -print -quit)"
+          if [ -z "$CONFIG" ]; then
+            echo 'arm64-v8a ncnnConfig.cmake not found; listing candidates:'
+            find "$DEP" -name ncnnConfig.cmake -print
+            exit 1
+          fi
           NCNN_CMAKE_DIR="$(dirname "$CONFIG")"
           echo "ncnn_dir=$NCNN_CMAKE_DIR" >> "$GITHUB_OUTPUT"
-          echo "NCNN CMake package: $NCNN_CMAKE_DIR"
+          echo "NCNN CMake package (arm64-v8a): $NCNN_CMAKE_DIR"
+          ls -la "$NCNN_CMAKE_DIR"
 
       - name: Download pretrained NCNN models
         shell: bash
@@ -128,6 +135,8 @@ jobs:
           NCNN_DIR: ${{ steps.ncnn.outputs.ncnn_dir }}
         run: |
           set -euo pipefail
+          echo "Using NCNN_DIR=$NCNN_DIR"
+          test -f "$NCNN_DIR/ncnnConfig.cmake"
           gradle --no-daemon --stacktrace \
             -PncnnDir="$NCNN_DIR" \
             -p "$SRC_DIR" \
