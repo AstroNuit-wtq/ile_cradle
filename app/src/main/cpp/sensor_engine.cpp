@@ -67,9 +67,6 @@ void SensorEngine::poll() {
         const float y = event.data[1];
         const float z = event.data[2];
         const float w = event.data[3];
-        // Android's azimuth is the heading of the device's top edge (+Y),
-        // not a generic yaw around the device Z axis. These matrix terms are
-        // equivalent to SensorManager.getOrientation() for a portrait device.
         const float rotationR1 = 2.0f * (x * y - w * z);
         const float rotationR4 = 1.0f - 2.0f * (x * x + z * z);
         const float azimuth = std::atan2(rotationR1, rotationR4);
