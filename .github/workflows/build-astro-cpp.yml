@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'app/**'
+      - 'kit_parts/**'
       - 'build.gradle'
       - 'settings.gradle'
       - 'gradle.properties'
@@ -27,6 +28,41 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Reconstruct source ZIP from kit_parts (if needed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$GITHUB_WORKSPACE/Diplomka_Native_CPP_Source.zip"
+          PARTS="$GITHUB_WORKSPACE/kit_parts"
+          if [ -f "$ARCHIVE" ]; then
+            echo "Archive already present"
+            exit 0
+          fi
+          if [ ! -f "$PARTS/manifest.json" ]; then
+            echo "No archive and no kit_parts/manifest.json — will try tree build"
+            exit 0
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, json, hashlib, sys
+          parts_dir = Path('kit_parts')
+          manifest = json.loads((parts_dir / 'manifest.json').read_text())
+          chunks = []
+          for i in range(manifest['parts']):
+              p = parts_dir / f"Diplomka_Native_CPP_Source.zip.{i:02d}.b64"
+              if not p.exists():
+                  print(f'Missing shard {p}', file=sys.stderr)
+                  sys.exit(1)
+              chunks.append(p.read_text().strip())
+          data = base64.b64decode(''.join(chunks))
+          digest = hashlib.sha256(data).hexdigest()
+          if digest != manifest['sha256']:
+              print('SHA256 mismatch', digest, manifest['sha256'], file=sys.stderr)
+              sys.exit(1)
+          Path(manifest['filename']).write_bytes(data)
+          print('Reconstructed', manifest['filename'], 'size', len(data))
+          PY
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
