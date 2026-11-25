@@ -198,7 +198,8 @@ void drawUi(AppState& state, EglState& egl) {
             ImVec2 size = avail;
             if (size.x / size.y > aspect) size.x = size.y * aspect;
             else size.y = size.x / aspect;
-            ImGui::Image(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(state.previewTexture)), size);
+            // ImTextureID is unsigned long long in current ImGui — cast via uintptr_t
+            ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(state.previewTexture)), size);
 
             // Overlay detections
             const ImVec2 p0 = ImGui::GetItemRectMin();
