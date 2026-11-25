@@ -1,9 +1,0 @@
-.gradle/
-build/
-.externalNativeBuild/
-.cxx/
-local.properties
-*.apk
-*.aab
-app/src/main/assets/*.ncnn.param
-app/src/main/assets/*.ncnn.bin
