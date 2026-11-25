@@ -1,48 +1,40 @@
-# Diplomka — Симуляция навигации дрона доставки
+# Diplomka Native — Android C++
 
-Android-приложение для дипломного проекта.  
-Реализует real-time симуляцию полёта дрона-доставщика с камеры телефона.
+Полностью нативное Android-приложение (NDK / NativeActivity + Dear ImGui + NCNN).
 
-## Возможности
+**Нет Python. Нет Kotlin/Java в исходниках приложения.**
 
-- **Живой видеопоток** с камеры телефона (вид «с дрона»)
-- **Панель команд в реальном времени** (не муляж) — все решения пайплайна отображаются сразу
-- **Детекция**:
-  - люди / движение (stop-сигнал)
-  - машины
-  - здания
-- **Навигация методом ближайшего соседа** — определяется целевая точка на дороге
-- **Оценка ширины дороги**
-- **Одометрия** (скорость + пройденная дистанция) по изменению кадров
-- **Определение погоды** по визуальным признакам неба
+## Содержимое репозитория
 
-Логика объединена из оригинальных Python-скриптов диплома:
-`detect_objects.py`, `hog_detection.py`, `yellow_road.py`, `width_road.py`, `time_and_distance.py` и др.
+| Файл | Назначение |
+|------|------------|
+| `.github/workflows/build-astro-cpp.yml` | GitHub Actions: сборка APK |
+| `Diplomka_Native_CPP_Source.zip` | Исходники C++ (единственный вход для сборки) |
+| `README.md` | Этот файл |
 
-## Сборка APK
+Сборка **не** коммитит APK, модели и intermediate-файлы в репозиторий. Всё собирается в `$RUNNER_TEMP`, APK публикуется в **Actions Artifacts**.
 
-1. Перейди в **Actions** → **Build Diplomka APK** → **Run workflow**
-2. После завершения скачай артефакт `Diplomka-Android` → `Diplomka-debug.apk`
-3. Установи на Android-телефон (разреши установку из неизвестных источников)
+## Как собрать APK
 
-## Структура
+1. **Actions** → **Build Diplomka Native C++ APK** → **Run workflow**
+2. Или push изменений в `Diplomka_Native_CPP_Source.zip` / workflow
+3. Скачать артефакт `Diplomka-Native-Cpp-APK` → `Diplomka-Native-C++-arm64-v8a.apk`
 
-```
-app/src/main/java/com/diplomka/app/
-├── MainActivity.kt
-├── ui/
-│   ├── DiplomkaApp.kt          # UI + CameraX + лог команд
-│   └── theme/Theme.kt
-└── vision/
-    └── DroneVisionPipeline.kt  # Единый CV-пайплайн
-```
+CI: JDK 17, Android SDK 35, NDK r30, CMake 3.22.1, Gradle 8.9, NCNN (SHA-256), YOLOv8n + YOLOv8n-pose.
 
-## Требования
+## Что уже в исходниках (см. ZIP)
 
-- Android 8.0+ (API 26)
-- Камера
-- Разрешение CAMERA
+- Camera2 NDK + YUV→RGBA, worker thread
+- NCNN YOLOv8n (объекты) + YOLOv8n-pose (скелет)
+- NMS + сглаживание между кадрами
+- Компас (rotation vector + circular filter)
+- GPS last-known
+- ImGui UI: 6 кнопок, стрелка подписей, скрываемый журнал
 
----
+## Что ещё нужно (приоритеты)
 
-Сделано для диплома.
+См. `docs/TASKS_AND_STATUS.md` внутри ZIP: камера multi-lens/torch, сегментация, depth, полноценный GPS/карты, offline, Vulkan, тесты на устройстве.
+
+## Важно
+
+Подготовленный код и CI **не означают**, что APK уже проверен на телефоне. Каждую функцию нужно отдельно проверить на реальном устройстве.
