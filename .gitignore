@@ -1,0 +1,22 @@
+# Build
+build/
+.cxx/
+.externalNativeBuild/
+.gradle/
+local.properties
+*.apk
+*.ap_
+*.dex
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (downloaded in CI)
+app/src/main/assets/*.ncnn.*
