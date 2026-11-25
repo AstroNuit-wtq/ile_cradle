@@ -11,7 +11,9 @@
 
     <application
         android:allowBackup="false"
-        android:label="Diplomka Native"
+        android:label="Diplomka"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:hasCode="true"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
         android:usesCleartextTraffic="false">
@@ -20,7 +22,7 @@
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode"
             android:exported="true"
             android:screenOrientation="portrait"
-            android:label="Diplomka Native">
+            android:label="Diplomka">
             <meta-data android:name="android.app.lib_name" android:value="diplomka_native" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
