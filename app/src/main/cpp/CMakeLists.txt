@@ -9,6 +9,7 @@ if(NOT ncnn_DIR)
     message(FATAL_ERROR "ncnn_DIR is required. The GitHub Actions workflow downloads the pinned NCNN Android package.")
 endif()
 find_package(ncnn REQUIRED CONFIG)
+find_package(Threads REQUIRED)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -67,6 +68,7 @@ find_library(media-lib mediandk)
 target_link_libraries(diplomka_native PRIVATE
     imgui_android
     ncnn
+    Threads::Threads
     ${android-lib}
     ${log-lib}
     ${egl-lib}
