@@ -24,8 +24,9 @@ public:
     bool start(FrameConsumer consumer);
     void stop();
     bool setTorch(bool enabled);
-    bool isRunning() const { return running_; }
+    bool isRunning() const { return running_.load(); }
     int framesReceived() const { return framesReceived_.load(); }
+    const char* lastError() const { return lastError_.c_str(); }
 
 private:
     static void onImageAvailable(void* context, AImageReader* reader);
@@ -37,6 +38,7 @@ private:
 
     void consumeLatestImage(AImageReader* reader);
     bool chooseBackCamera();
+    bool startRepeating();
 
     ACameraManager* manager_ = nullptr;
     ACameraDevice* device_ = nullptr;
@@ -48,12 +50,14 @@ private:
     ACaptureSessionOutputContainer* outputContainer_ = nullptr;
     ACaptureSessionOutput* sessionOutput_ = nullptr;
     std::string cameraId_;
+    std::string lastError_;
 
     std::mutex consumerMutex_;
     FrameConsumer consumer_;
     int width_ = 640;
     int height_ = 480;
     std::atomic<bool> running_{false};
+    std::atomic<bool> sessionActive_{false};
     std::atomic<int> framesReceived_{0};
     bool torchEnabled_ = false;
 };
