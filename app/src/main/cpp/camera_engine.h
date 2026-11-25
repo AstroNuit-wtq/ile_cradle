@@ -24,11 +24,11 @@ public:
     bool start(FrameConsumer consumer);
     void stop();
     bool setTorch(bool enabled);
+
     bool isRunning() const { return running_.load(); }
     bool isSessionActive() const { return sessionActive_.load(); }
-    bool isTorchAvailable() const { return flashAvailable_.load(); }
-    uint64_t frameCount() const { return frameCount_.load(); }
-    int lastErrorCode() const { return lastErrorCode_.load(); }
+    int framesReceived() const { return framesReceived_.load(); }
+    const std::string& lastError() const { return lastError_; }
     int frameWidth() const { return width_; }
     int frameHeight() const { return height_; }
 
@@ -42,7 +42,7 @@ private:
 
     void consumeLatestImage(AImageReader* reader);
     bool chooseBackCamera();
-    void setError(int errorCode, const char* operation);
+    bool startRepeating();
 
     ACameraManager* manager_ = nullptr;
     ACameraDevice* device_ = nullptr;
@@ -55,16 +55,13 @@ private:
     ACaptureSessionOutput* sessionOutput_ = nullptr;
     std::string cameraId_;
 
-    std::mutex lifecycleMutex_;
     std::mutex consumerMutex_;
     FrameConsumer consumer_;
     int width_ = 640;
     int height_ = 480;
     std::atomic<bool> running_{false};
     std::atomic<bool> sessionActive_{false};
-    std::atomic<bool> repeatingStarted_{false};
-    std::atomic<bool> flashAvailable_{false};
-    std::atomic<uint64_t> frameCount_{0};
-    std::atomic<int> lastErrorCode_{0};
+    std::atomic<int> framesReceived_{0};
+    std::string lastError_;
     bool torchEnabled_ = false;
 };
