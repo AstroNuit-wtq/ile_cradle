@@ -25,6 +25,7 @@ public:
     void stop();
     bool setTorch(bool enabled);
     bool isRunning() const { return running_; }
+    int framesReceived() const { return framesReceived_.load(); }
 
 private:
     static void onImageAvailable(void* context, AImageReader* reader);
@@ -48,11 +49,11 @@ private:
     ACaptureSessionOutput* sessionOutput_ = nullptr;
     std::string cameraId_;
 
-    std::mutex lifecycleMutex_;
     std::mutex consumerMutex_;
     FrameConsumer consumer_;
     int width_ = 640;
     int height_ = 480;
     std::atomic<bool> running_{false};
+    std::atomic<int> framesReceived_{0};
     bool torchEnabled_ = false;
 };
