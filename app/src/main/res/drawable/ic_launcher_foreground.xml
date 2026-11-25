@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple drone + lens mark -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,38c-6,0 -11,5 -11,11c0,4 2.2,7.5 5.5,9.4L44,70h6l3.2,-8.2c0.9,0.15 1.8,0.25 2.8,0.25s1.9,-0.1 2.8,-0.25L62,70h6l-4.5,-11.6c3.3,-1.9 5.5,-5.4 5.5,-9.4c0,-6 -5,-11 -11,-11zM54,44c2.8,0 5,2.2 5,5s-2.2,5 -5,5s-5,-2.2 -5,-5s2.2,-5 5,-5z"/>
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,40h10v4H30zM68,40h10v4H68zM30,64h10v4H30zM68,64h10v4H68z"/>
+    <path
+        android:fillColor="#4DA3FF"
+        android:pathData="M54,49m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0"/>
+</vector>
