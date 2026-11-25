@@ -4,13 +4,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cmath>
 #include <cstdint>
 #include <deque>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <android/asset_manager.h>
@@ -64,7 +62,6 @@ struct AppState {
     bool detectionEnabled = true;
     bool showPose = true;
     bool stopSignal = false;
-    float nearestObstacleMeters = -1.0f;
 
     std::deque<std::string> commandLog;
     std::mutex logMutex;
@@ -75,6 +72,9 @@ struct AppState {
 
     bool animating = true;
     bool imguiInitialized = false;
+    bool cameraStarted = false;
+    int cameraRetryCount = 0;
+    std::chrono::steady_clock::time_point lastCameraAttempt{};
 };
 
 void pushLog(AppState& state, const std::string& line) {
@@ -138,6 +138,11 @@ void initImGui(android_app* app, EglState& egl) {
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
+    // Larger touch targets for phone use
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.TouchExtraPadding = ImVec2(8.0f, 8.0f);
+    style.ItemSpacing = ImVec2(10.0f, 12.0f);
+    style.FramePadding = ImVec2(12.0f, 10.0f);
     ImGui_ImplAndroid_Init(app->window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
     io.DisplaySize = ImVec2(static_cast<float>(egl.width), static_cast<float>(egl.height));
@@ -169,12 +174,30 @@ void uploadPreviewTexture(AppState& state, const uint8_t* rgba, int w, int h) {
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-// Approximate monocular proximity score from bounding-box area (no metric claim).
 float proximityFromBox(const RectF& box, int frameW, int frameH) {
     if (frameW <= 0 || frameH <= 0) return 0.0f;
     const float area = std::max(0.0f, box.right - box.left) * std::max(0.0f, box.bottom - box.top);
     const float frameArea = static_cast<float>(frameW) * frameH;
     return std::clamp(area / frameArea, 0.0f, 1.0f);
+}
+
+void tryStartCamera(AppState& state) {
+    state.lastCameraAttempt = std::chrono::steady_clock::now();
+    state.cameraRetryCount++;
+    const bool ok = state.camera.start([&state](std::vector<uint8_t>&& rgba, int w, int h) {
+        std::lock_guard<std::mutex> lock(state.frameMutex);
+        state.latestRgba = std::move(rgba);
+        state.latestWidth = w;
+        state.latestHeight = h;
+        state.hasNewFrame = true;
+    });
+    state.cameraStarted = ok;
+    if (ok) {
+        pushLog(state, "Camera started (try " + std::to_string(state.cameraRetryCount) + ")");
+    } else {
+        pushLog(state, "Camera start FAILED (try " + std::to_string(state.cameraRetryCount) +
+                        ") — check CAMERA permission");
+    }
 }
 
 void drawUi(AppState& state, EglState& egl) {
@@ -198,22 +221,26 @@ void drawUi(AppState& state, EglState& egl) {
             ImVec2 size = avail;
             if (size.x / size.y > aspect) size.x = size.y * aspect;
             else size.y = size.x / aspect;
-            // ImTextureID is unsigned long long in current ImGui — cast via uintptr_t
             ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(state.previewTexture)), size);
 
-            // Overlay detections
             const ImVec2 p0 = ImGui::GetItemRectMin();
             const ImVec2 p1 = ImGui::GetItemRectMax();
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            // Note: vision results are consumed on the main thread after processRgba.
-            // For the first native port we draw the last known counts only.
             if (state.stopSignal) {
                 dl->AddRectFilled(p0, p1, IM_COL32(180, 20, 20, 70));
                 dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(255, 80, 80, 255), "STOP");
             }
         } else {
             ImGui::TextUnformatted("Waiting for camera...");
+            ImGui::Spacing();
+            if (!state.cameraStarted) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                                   "Camera not started.\nGrant CAMERA permission\nand tap Restart Camera.");
+            } else if (state.camera.framesReceived() == 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                                   "Camera open, no frames yet.\nPermission may still be pending.");
+            }
         }
     }
     ImGui::EndChild();
@@ -226,20 +253,28 @@ void drawUi(AppState& state, EglState& egl) {
         ImGui::Text("Diplomka Native C++");
         ImGui::Separator();
 
-        if (ImGui::Button(state.torchOn ? "Torch OFF" : "Torch ON", ImVec2(-1, 0))) {
+        if (ImGui::Button(state.torchOn ? "Torch OFF" : "Torch ON", ImVec2(-1, 48))) {
             state.torchOn = !state.torchOn;
             state.camera.setTorch(state.torchOn);
             pushLog(state, state.torchOn ? "Torch enabled" : "Torch disabled");
         }
-        if (ImGui::Button(state.detectionEnabled ? "Detection ON" : "Detection OFF", ImVec2(-1, 0))) {
+        if (ImGui::Button(state.detectionEnabled ? "Detection ON" : "Detection OFF", ImVec2(-1, 48))) {
             state.detectionEnabled = !state.detectionEnabled;
             pushLog(state, state.detectionEnabled ? "Detection enabled" : "Detection paused");
         }
-        if (ImGui::Button(state.showPose ? "Pose ON" : "Pose OFF", ImVec2(-1, 0))) {
+        if (ImGui::Button(state.showPose ? "Pose ON" : "Pose OFF", ImVec2(-1, 48))) {
             state.showPose = !state.showPose;
+        }
+        if (ImGui::Button("Restart Camera", ImVec2(-1, 48))) {
+            state.camera.stop();
+            state.cameraStarted = false;
+            tryStartCamera(state);
         }
 
         ImGui::Separator();
+        ImGui::Text("Cam: %s  frames=%d",
+                    state.camera.isRunning() ? "RUN" : "OFF",
+                    state.camera.framesReceived());
         ImGui::Text("Heading: %s", state.sensors.hasHeading() ?
                     (std::to_string(static_cast<int>(state.sensors.headingDegrees())) + " deg").c_str() : "--");
         ImGui::Text("Infer: %.1f ms", state.lastInferenceMs);
@@ -305,7 +340,6 @@ void engineLoop(android_app* app) {
 
     EglState egl{};
 
-    // Wait for window
     while (!app->destroyRequested) {
         int events = 0;
         android_poll_source* source = nullptr;
@@ -322,25 +356,27 @@ void engineLoop(android_app* app) {
 
                 AAssetManager* assets = app->activity->assetManager;
                 state.vision.initialize(assets);
-
                 state.sensors.start(app->looper);
 
-                state.camera.start([&state](std::vector<uint8_t>&& rgba, int w, int h) {
-                    std::lock_guard<std::mutex> lock(state.frameMutex);
-                    state.latestRgba = std::move(rgba);
-                    state.latestWidth = w;
-                    state.latestHeight = h;
-                    state.hasNewFrame = true;
-                });
-                pushLog(state, "Camera + sensors started");
+                // Slight delay: Java MainActivity may still be showing the permission dialog.
+                tryStartCamera(state);
             }
         }
 
         if (egl.display == EGL_NO_DISPLAY || !state.animating) continue;
 
+        // Auto-retry camera a few times if no frames (permission granted after first open attempt).
+        if (state.cameraStarted && state.camera.framesReceived() == 0 && state.cameraRetryCount < 6) {
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - state.lastCameraAttempt).count() >= 2) {
+                LOGW("No frames after 2s — restarting camera (permission?)");
+                state.camera.stop();
+                tryStartCamera(state);
+            }
+        }
+
         state.sensors.poll();
 
-        // Process latest camera frame
         std::vector<uint8_t> frameCopy;
         int fw = 0, fh = 0;
         {
@@ -362,13 +398,9 @@ void engineLoop(android_app* app) {
             state.detectionCount = static_cast<int>(vf.detections.size());
             state.poseCount = static_cast<int>(vf.people.size());
 
-            // STOP when any detection covers a large fraction of the frame (near obstacle).
             bool near = false;
-            float maxProx = 0.0f;
             for (const auto& d : vf.detections) {
-                const float p = proximityFromBox(d.box, fw, fh);
-                maxProx = std::max(maxProx, p);
-                if (p > 0.22f) near = true; // ~22% of frame area → treat as close
+                if (proximityFromBox(d.box, fw, fh) > 0.22f) near = true;
             }
             state.stopSignal = near;
             if (near) {
