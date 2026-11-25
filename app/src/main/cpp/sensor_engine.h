@@ -6,20 +6,28 @@
 
 class SensorEngine {
 public:
+    SensorEngine();
     ~SensorEngine();
-    bool start(ALooper* looper);
-    void stop();
-    void poll();
 
-    bool hasHeading() const { return filter_.hasValue(); }
-    float headingDegrees() const { return filter_.value(); }
-    int accuracy() const { return accuracy_; }
+    bool start();
+    void stop();
+
+    float headingDegrees() const { return filter_.heading(); }
+    float proximityCm() const { return proximityCm_; }
+    bool hasProximity() const { return hasProximity_; }
 
 private:
+    static int sensorCallback(int fd, int events, void* data);
+    void processEvents();
+
     ASensorManager* manager_ = nullptr;
-    const ASensor* rotationVector_ = nullptr;
     ASensorEventQueue* queue_ = nullptr;
-    CircularHeadingFilter filter_;
-    int accuracy_ = 0;
-    int64_t lastTimestampNs_ = 0;
+    const ASensor* accel_ = nullptr;
+    const ASensor* mag_ = nullptr;
+    const ASensor* proximity_ = nullptr;
+
+    HeadingFilter filter_;
+    float proximityCm_ = 100.f;
+    bool hasProximity_ = false;
+    bool running_ = false;
 };

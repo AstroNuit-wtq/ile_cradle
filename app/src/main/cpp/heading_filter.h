@@ -3,45 +3,45 @@
 #include <algorithm>
 #include <cmath>
 
-// Pure C++ circular low-pass filter, kept separate so the wrap-around and
-// spike-rejection behavior can be unit-tested on a desktop toolchain.
-class CircularHeadingFilter {
+// Pure C++ circular low-pass filter, kept separate for unit testing.
+class HeadingFilter {
 public:
-    bool update(float rawDegrees, float deltaSeconds, bool reliable = true) {
-        if (!reliable || !std::isfinite(rawDegrees)) return false;
-        rawDegrees = normalize(rawDegrees);
-        const float dt = std::clamp(deltaSeconds, 0.005f, 0.25f);
-        if (!initialized_) {
-            heading_ = rawDegrees;
-            initialized_ = true;
-            return true;
-        }
-        const float delta = shortestDelta(heading_, rawDegrees);
-        const float maxStep = std::max(18.0f, 540.0f * dt);
-        if (std::fabs(delta) > maxStep * 2.0f) return false;
-        constexpr float timeConstantSeconds = 0.22f;
-        const float alpha = 1.0f - std::exp(-dt / timeConstantSeconds);
-        heading_ = normalize(heading_ + delta * alpha);
-        return true;
+    explicit HeadingFilter(float alpha = 0.15f) : alpha_(alpha) {}
+
+    void reset() {
+        initialized_ = false;
+        heading_ = 0.f;
     }
 
-    bool hasValue() const { return initialized_; }
-    float value() const { return heading_; }
-    void reset() { initialized_ = false; heading_ = 0.0f; }
+    void update(float ax, float ay, float az, float mx, float my, float mz) {
+        // Simple tilt-compensated compass
+        float roll = std::atan2(ay, az);
+        float pitch = std::atan2(-ax, std::sqrt(ay * ay + az * az));
+
+        float mx2 = mx * std::cos(pitch) + mz * std::sin(pitch);
+        float my2 = mx * std::sin(roll) * std::sin(pitch) + my * std::cos(roll) - mz * std::sin(roll) * std::cos(pitch);
+
+        float heading = std::atan2(-my2, mx2) * 180.f / 3.14159265f;
+        if (heading < 0.f) heading += 360.f;
+
+        if (!initialized_) {
+            heading_ = heading;
+            initialized_ = true;
+        } else {
+            // Circular lerp
+            float diff = heading - heading_;
+            if (diff > 180.f) diff -= 360.f;
+            if (diff < -180.f) diff += 360.f;
+            heading_ += alpha_ * diff;
+            if (heading_ < 0.f) heading_ += 360.f;
+            if (heading_ >= 360.f) heading_ -= 360.f;
+        }
+    }
+
+    float heading() const { return heading_; }
 
 private:
-    static float normalize(float value) {
-        value = std::fmod(value, 360.0f);
-        if (value < 0.0f) value += 360.0f;
-        return value;
-    }
-    static float shortestDelta(float from, float to) {
-        float delta = normalize(to) - normalize(from);
-        if (delta > 180.0f) delta -= 360.0f;
-        if (delta < -180.0f) delta += 360.0f;
-        return delta;
-    }
-
+    float alpha_;
+    float heading_ = 0.f;
     bool initialized_ = false;
-    float heading_ = 0.0f;
 };
