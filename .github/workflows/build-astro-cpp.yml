@@ -34,15 +34,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Explicit packages — never request the obsolete 'tools' package
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android build packages
         shell: bash
         run: |
           set -euo pipefail
           set +o pipefail
-          yes | sdkmanager --licenses >/dev/null
+          yes | sdkmanager --licenses >/dev/null || true
           set -o pipefail
           sdkmanager \
             'platform-tools' \
